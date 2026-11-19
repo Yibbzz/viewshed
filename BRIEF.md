@@ -1,10 +1,10 @@
-# Project Brief: sightshed, a Fast, Exact Viewshed Library for Python
+# Project Brief: viewshed, a Fast, Exact Viewshed Library for Python and Rust
 
 Nov 19, 2026 · @Nathan
 
 ## Overview and goal
 
-Build a free, open-source Python library, written in Rust, that computes viewsheds with **true line of sight**. It should be as fast as the fast approximate tools and as accurate as the exact ones. It installs with `pip install sightshed` on any platform, with no GDAL, GRASS or compiler needed, and takes NumPy arrays in and gives NumPy arrays out.
+Build a free, open-source Python library, written in Rust, that computes viewsheds with **true line of sight**. It should be as fast as the fast approximate tools and as accurate as the exact ones. It installs with `pip install viewshed` on any platform, with no GDAL, GRASS or compiler needed, and takes NumPy arrays in and gives NumPy arrays out.
 
 **Problem.** Python users pick between fast and wrong, and right but awkward:
 
@@ -24,7 +24,7 @@ Build a free, open-source Python library, written in Rust, that computes viewshe
 - **Many observers** as a first-class feature: cumulative counts, visibility index and ZTV, spread across all CPU cores.
 - Practical limits apps need: azimuth and elevation limits (a camera's field of view), minimum and maximum distance, observer and target heights, earth curvature and refraction, and a choice of cell rule (centre visible vs any part visible).
 
-**Working name:** `sightshed` (free on PyPI as of Nov 19, 2026; `viewshed` is also free but too generic).
+**Name:** `viewshed` on both PyPI and crates.io, claimed with a working 0.0.1 release (a simple, correct line-of-sight viewshed) on Nov 19, 2026. Tagline everywhere: *Fast, exact line-of-sight viewsheds.*
 
 ## Prior art and reuse
 
@@ -44,10 +44,10 @@ Implement from the published papers. Don't copy GPL code (GRASS) into a permissi
 
 | Phase | Includes |
 | --- | --- |
-| 0: Conformance suite and benchmark | No library code yet. Build the conformance suite (see below), then benchmark GDAL, `r.viewshed`, xarray-spatial, WhiteboxTools and the PhotoFootprint sweep for accuracy (against a brute-force line-of-sight reference) and speed, on synthetic surfaces and a real 1 m Environment Agency LiDAR DSM. Include a many-observer case. **Go/no-go:** go ahead only if the gap is real. |
+| 0: Conformance suite and benchmark | No library code yet. Build the conformance suite (see below), then benchmark GDAL, `r.viewshed`, xarray-spatial, WhiteboxTools and the PhotoFootprint sweep for accuracy (against the conformance suite's exact oracles) and speed, on synthetic surfaces and a real 1 m Environment Agency LiDAR DSM. Include a many-observer case. **Go/no-go:** go ahead only if the gap is real. |
 | 1: MVP | Exact single-observer viewshed. Options: observer height, target height, min/max distance, azimuth limits, elevation limits, curvature and refraction, no-data. Outputs: visible mask, plus optionally the elevation angle and the height above the surface a target would need to be visible. abi3 wheels for all major platforms on PyPI. |
 | 2: Many observers | Cumulative count over a list of observers. Visibility index (every cell, or a stride). ZTV: from how many observers a target of a given height is visible. Spread over all cores. Bounded memory. |
-| 3: Integrations | Optional helpers for rasterio/GDAL files (`sightshed[io]`), a QGIS Processing provider (pure-Python plugin that uses the library when installed), and use as an optional speed-up in PhotoFootprint. |
+| 3: Integrations | Optional helpers for rasterio/GDAL files (`viewshed[io]`), a QGIS Processing provider (pure-Python plugin that uses the library when installed), and use as an optional speed-up in PhotoFootprint. |
 
 **Out of scope (for now):** GPU, 3D meshes and voxel visibility, rasters too big for memory (Phase 2 tiles a window per observer instead), and Fresnel or radio propagation.
 
@@ -62,9 +62,9 @@ Implement from the published papers. Don't copy GPL code (GRASS) into a permissi
 **2. Single-observer API (Phase 1)**
 
 ```python
-import sightshed
+import viewshed
 
-mask = sightshed.viewshed(
+mask = viewshed.viewshed(
     dem,                      # 2-D float32/float64 NumPy array, NaN = no data
     transform,                # GDAL-style geotransform (x0, dx, 0, y0, 0, dy)
     observer=(x, y),
@@ -84,9 +84,9 @@ mask = sightshed.viewshed(
 **3. Many observers (Phase 2)**
 
 ```python
-counts = sightshed.cumulative(dem, transform, observers)        # observers: (n, 2) or (n, 3) array
-index = sightshed.visibility_index(dem, transform, stride=1, max_distance=..., observer_height=...)
-ztv = sightshed.ztv(dem, transform, targets, target_heights, observer_height=1.6)
+counts = viewshed.cumulative(dem, transform, observers)        # observers: (n, 2) or (n, 3) array
+index = viewshed.visibility_index(dem, transform, stride=1, max_distance=..., observer_height=...)
+ztv = viewshed.ztv(dem, transform, targets, target_heights, observer_height=1.6)
 ```
 
 - Parallel across observers, deterministic results, progress callback, cancellation.
@@ -94,7 +94,7 @@ ztv = sightshed.ztv(dem, transform, targets, target_heights, observer_height=1.6
 
 **4. Packaging**
 
-- Rust library crate (`sightshed-core`, also on crates.io) plus a Python crate via PyO3.
+- Rust library crate `viewshed` on crates.io (usable directly from Rust), plus an internal, unpublished PyO3 bindings crate that maturin builds into the `viewshed` Python package.
 - Wheels: manylinux x86_64 and aarch64; macOS x86_64 and arm64; Windows x64. abi3 for Python 3.9 and later, so one wheel per platform covers every Python that QGIS ships.
 - No runtime dependencies beyond NumPy.
 
@@ -112,7 +112,7 @@ These are provisional and get calibrated in Phase 0.
 - **Accuracy:** at least 99.9% cell agreement with `r.viewshed` (`centre` rule, same heights) on the synthetic set and the LiDAR tile, and 100% agreement with the brute-force reference on small rasters.
 - **Single observer:** at least 5× faster than `r.viewshed` (including its start-up) and no slower than GDAL single-threaded, for a 1,000-cell radius.
 - **Many observers:** 1,000 observers × 500-cell radius in under 60 s on an 8-core laptop.
-- **Install:** `pip install sightshed` gives a working import on Windows, macOS and Linux with no compiler.
+- **Install:** `pip install viewshed` gives a working import on Windows, macOS and Linux with no compiler.
 
 ## Milestones and acceptance criteria
 
@@ -122,7 +122,7 @@ These are provisional and get calibrated in Phase 0.
 4. **M3: Options.** Azimuth and elevation limits, min distance, curvature and refraction, the `any` cell rule, and the `angle` and `height_needed` outputs, each with tests.
 5. **M4: Many observers.** Cumulative, visibility index and ZTV; meets the many-observer target.
 6. **M5: Release.** Docs site, examples (camera field of view, wind turbine ZTV), version 0.1 on PyPI and crates.io.
-7. **M6: Integrations.** `sightshed[io]` helpers, a QGIS Processing provider plugin, and the optional speed-up in PhotoFootprint.
+7. **M6: Integrations.** `viewshed[io]` helpers, a QGIS Processing provider plugin, and the optional speed-up in PhotoFootprint.
 
 ## Conformance suite: one CI that compares every viewshed tool
 
@@ -138,7 +138,7 @@ Its own Python package in the repo (`conformance/`), built **first**: Phase 0's 
    The output per cell is the **clearance**, the smallest height of the sightline above the surface, not just visible or hidden.
 2. **Analytic scenes** (how close is it to the real geometry?). Scenes defined as continuous shapes (box buildings, a cone hill, a ridge, a thin wall, a slope), with true visibility from closed-form geometry. Rasterise at 4, 2, 1 and 0.5 m and measure each tool's error as cells get finer. Good tools converge; an algorithm-level flaw shows up as error that doesn't shrink.
 
-**Tools compared on every run:** GDAL (all modes), GRASS `r.viewshed`, xarray-spatial, WhiteboxTools, PhotoFootprint's NumPy sweep, and `sightshed` (each cell rule). Each tool gets a small adapter: the same inputs and heights, its output resampled onto the oracle's grid.
+**Tools compared on every run:** GDAL (all modes), GRASS `r.viewshed`, xarray-spatial, WhiteboxTools, PhotoFootprint's NumPy sweep, and `viewshed` (each cell rule). Each tool gets a small adapter: the same inputs and heights, its output resampled onto the oracle's grid.
 
 **Metrics:**
 - wrongly hidden and wrongly visible, split into clearance bands (cells under 1 cm reported as ambiguous and set aside; 1 cm–10 cm; 10 cm–1 m; over 1 m);
@@ -153,7 +153,7 @@ Its own Python package in the repo (`conformance/`), built **first**: Phase 0's 
 
 Oracle results are cached by a hash of their inputs, so CI only recomputes when inputs change.
 
-**CI:** one pinned Docker image (GDAL, GRASS, WhiteboxTools, Rust toolchain). Every push produces a report (Markdown tables plus charts) as a build artefact and job summary. Only `sightshed`'s own targets fail the build: 100% agreement with its declared model's oracle on small rasters, and no accuracy or speed regression beyond set limits. Other tools are tracked, not gated.
+**CI:** one pinned Docker image (GDAL, GRASS, WhiteboxTools, Rust toolchain). Every push produces a report (Markdown tables plus charts) as a build artefact and job summary. Only `viewshed`'s own targets fail the build: 100% agreement with its declared model's oracle on small rasters, and no accuracy or speed regression beyond set limits. Other tools are tracked, not gated.
 
 **Limits, stated in the report:** everything is relative to the DEM. Real-world ground truth (surveyed visibility from known points, such as photos) is a possible later dataset, not part of the baseline.
 
@@ -172,12 +172,12 @@ Oracle results are cached by a hash of their inputs, so CI only recomputes when 
 ## Using it from QGIS (PhotoFootprint and other plugins)
 
 - The QGIS plugin repository asks plugins **not to bundle binaries**, so the compiled wheel can't ship inside a plugin zip.
-- Instead, `sightshed` is an **optional dependency**: the user (or the qpip plugin, from a requirements file) pip-installs it into QGIS's own Python. The plugin checks for it at import and **falls back to its NumPy sweep** if it's missing. Results must match, so share the same test cases.
+- Instead, `viewshed` is an **optional dependency**: the user (or the qpip plugin, from a requirements file) pip-installs it into QGIS's own Python. The plugin checks for it at import and **falls back to its NumPy sweep** if it's missing. Results must match, so share the same test cases.
 - abi3 wheels for Python 3.9+ cover the Python versions QGIS ships on Windows, macOS and Linux.
 
 ## Open questions for the owner
 
-- [ ] Name: `sightshed`, or something else?
+- [x] Name: `viewshed` (decided Nov 19, 2026).
 - [ ] Licence: MIT OR Apache-2.0 (recommended), or GPL to match the GIS ecosystem?
 - [ ] Which comes first after the MVP, the LVIA many-observer features or app integration (PhotoFootprint)?
 - [ ] A real test area: an EA 1 m LiDAR DSM tile, ideally with buildings, trees and hills.
