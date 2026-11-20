@@ -90,7 +90,7 @@ def ztv(dem, transform, targets, observer_height=2.0, max_distance=None, method=
     observer_height: eye height above every cell.
     method: "forward" (default; every cell is an observer looking at every target,
         which is the definition) or "reciprocal" (one viewshed from each target down
-        to every cell: about 20 times faster on a wind farm, and agrees with "forward"
+        to every cell: about 5 times faster on a wind farm, and agrees with "forward"
         on all but a few cells at shadow edges).
     Returns a uint32 array shaped like `dem`; no-data cells are 0.
     """

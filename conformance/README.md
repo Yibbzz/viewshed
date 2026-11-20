@@ -57,6 +57,15 @@ sweep, and `viewshed-rs-bilinear`), the Python 0.0.1 reference, GDAL in all four
 modes (curvature off), GRASS `r.viewshed` (one session per run; start-up reported
 separately) and the PhotoFootprint sweep (`PHOTOFOOTPRINT=/path/to/repo`).
 
+## Golden outputs (`golden.py`, `golden.json`)
+
+Fixed scenes (single viewshed, ZTV forward and reciprocal, flat and curved,
+no-data holes) with SHA-256 hashes of their inputs and exact outputs.
+`tests/test_golden.py` fails if any output changes by a single cell, so a speed
+change can't alter results unnoticed. Record new hashes with
+`python -m conformance.golden --update` only after a change has been verified
+cell for cell against the oracles.
+
 ## Earth curvature and refraction
 
 Both oracles take `curvature`, `refraction` and `earth_radius`. In the bilinear

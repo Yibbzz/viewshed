@@ -8,8 +8,10 @@
 //!   centre + the target's height), evaluated with the same r.viewshed model
 //!   as [`crate::viewshed`]. The answer for a cell equals running a full
 //!   viewshed from that cell and reading the target's cell. Each observer
-//!   walks only the cells its sightline crosses, so the cost is about one
-//!   line of sight per cell and target: O(n · d).
+//!   walks only the cells its sightline crosses, and skips whole stretches
+//!   whose highest point (from a max-height pyramid) provably can't reach
+//!   the sightline, so the cost is at most one line of sight per cell and
+//!   target, O(n · d), and much less over open ground.
 //! - [`ZtvMethod::Reciprocal`] is the usual shortcut: one viewshed per target,
 //!   *from* the target's height down to `observer_height` above every cell.
 //!   A sightline is the same both ways, but the r.viewshed model isn't
@@ -112,6 +114,7 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
         ZtvMethod::Forward => {
             let cols = grid.cols;
             let drop = opts.view().drop_factor();
+            let pyramid = MaxPyramid::new(grid);
             let mut counts = vec![0u32; grid.rows * cols];
             counts.par_chunks_mut(cols).enumerate().for_each(|(r, row)| {
                 for (c, n) in row.iter_mut().enumerate() {
@@ -121,7 +124,7 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
                     }
                     let eye = z + opts.observer_height;
                     for &(rt, ct, h) in &cells {
-                        if sees(grid, r as i64, c as i64, eye, drop, rt, ct, h, opts.max_distance) {
+                        if sees(grid, &pyramid, r as i64, c as i64, eye, drop, rt, ct, h, opts.max_distance) {
                             *n += 1;
                         }
                     }
@@ -129,6 +132,56 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
             });
             Ok(counts)
         }
+    }
+}
+
+/// Maximum height over aligned 2^l x 2^l blocks, for every level l. No-data
+/// counts as -infinity (it never blocks).
+pub(crate) struct MaxPyramid {
+    levels: Vec<(usize, usize, Vec<f64>)>, // (rows, cols, maxima), level 0 = the grid
+}
+
+impl MaxPyramid {
+    pub(crate) fn new(grid: &Grid) -> Self {
+        let base: Vec<f64> = grid.z.iter().map(|&v| if v.is_nan() { f64::NEG_INFINITY } else { v }).collect();
+        let mut levels = vec![(grid.rows, grid.cols, base)];
+        while {
+            let (r, c, _) = levels.last().unwrap();
+            *r > 1 || *c > 1
+        } {
+            let (r, c, prev) = levels.last().unwrap();
+            let (nr, nc) = ((r + 1) / 2, (c + 1) / 2);
+            let mut next = vec![f64::NEG_INFINITY; nr * nc];
+            for i in 0..*r {
+                for j in 0..*c {
+                    let k = (i / 2) * nc + j / 2;
+                    next[k] = next[k].max(prev[i * c + j]);
+                }
+            }
+            levels.push((nr, nc, next));
+        }
+        MaxPyramid { levels }
+    }
+
+    /// An upper bound on the height of any cell in rows r0..=r1, cols c0..=c1
+    /// (clipped to the grid): the maximum of the few blocks that cover them.
+    pub(crate) fn max_in(&self, r0: i64, r1: i64, c0: i64, c1: i64) -> f64 {
+        let (rows, cols, _) = self.levels[0];
+        let (r0, r1) = (r0.max(0), r1.min(rows as i64 - 1));
+        let (c0, c1) = (c0.max(0), c1.min(cols as i64 - 1));
+        if r0 > r1 || c0 > c1 {
+            return f64::NEG_INFINITY;
+        }
+        let span = ((r1 - r0).max(c1 - c0) + 1) as u64;
+        let l = ((63 - span.leading_zeros()) as usize).min(self.levels.len() - 1);
+        let (_, nc, ref m) = self.levels[l];
+        let mut best = f64::NEG_INFINITY;
+        for i in (r0 >> l)..=(r1 >> l) {
+            for j in (c0 >> l)..=(c1 >> l) {
+                best = best.max(m[i as usize * nc + j as usize]);
+            }
+        }
+        best
     }
 }
 
@@ -141,6 +194,7 @@ fn cross(a: (i64, i64), b: (i64, i64)) -> i128 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sees(
     grid: &Grid,
+    pyramid: &MaxPyramid,
     rv: i64,
     cv: i64,
     eye: f64,
@@ -177,10 +231,11 @@ pub(crate) fn sees(
     // crosses. Each candidate is then tested exactly: strictly closer than the
     // target, and the target direction strictly inside its corner span.
     let (n, x_major) = if dc.abs() >= dr.abs() { (dc.abs(), true) } else { (dr.abs(), false) };
-    for i in 0..=n {
-        let (major, minor_end) = if x_major { (i * dc.signum(), dr) } else { (i * dr.signum(), dc) };
-        let minor = major as f64 * minor_end as f64 / if x_major { dc as f64 } else { dr as f64 };
-        let k0 = minor.floor() as i64;
+    let (major_sign, minor_end, major_end) = if x_major { (dc.signum(), dr, dc) } else { (dr.signum(), dc, dr) };
+    let minor_at = |i: i64| (i * major_sign) as f64 * minor_end as f64 / major_end as f64;
+    let mut visit = |i: i64| -> bool {
+        let major = i * major_sign;
+        let k0 = minor_at(i).floor() as i64;
         for k in k0 - 1..=k0 + 2 {
             let (br, bc) = if x_major { (k, major) } else { (major, k) };
             if (br == 0 && bc == 0) || br * br + bc * bc >= key {
@@ -201,9 +256,69 @@ pub(crate) fn sees(
                 continue;
             }
             if cell.lo() > sure_above || target.blocked_by(&cell) {
-                return false;
+                return true;
             }
         }
+        false
+    };
+
+    // Bound for steps [a, b): no sample of any candidate cell there can have a
+    // slope above this. Heights: the maximum over the candidates and the
+    // neighbours their corners average in (corner means can't exceed it, and
+    // curvature only lowers them). Distances: every sample is at least
+    // a - 0.5 cells along the major axis and at most the far corner away.
+    // Floating-point division and subtraction are monotone, so the bound
+    // holds for the computed slopes too, and skipping a range where it is
+    // below `skip_below` skips only cells the per-cell test would skip.
+    let res = grid.res();
+    let bound = |a: i64, b: i64| -> f64 {
+        let (m0, m1) = (minor_at(a), minor_at(b - 1));
+        let kmin = m0.min(m1).floor() as i64 - 2;
+        let kmax = m0.max(m1).floor() as i64 + 3;
+        let (j0, j1) = ((a - 1) * major_sign, b * major_sign);
+        let (jmin, jmax) = (j0.min(j1), j0.max(j1));
+        let (r0, r1, c0, c1) = if x_major {
+            (rv + kmin, rv + kmax, cv + jmin, cv + jmax)
+        } else {
+            (rv + jmin, rv + jmax, cv + kmin, cv + kmax)
+        };
+        let h = pyramid.max_in(r0, r1, c0, c1);
+        if h == f64::NEG_INFINITY {
+            return f64::NEG_INFINITY; // nothing but no-data or off the grid
+        }
+        let rise = h - eye;
+        if rise >= 0.0 {
+            let dmin = (a as f64 - 0.5).max(0.5) * res * (1.0 - 1e-12);
+            rise / dmin
+        } else {
+            let far = (b as f64 + 3.5) * res;
+            let dmax = (far * far * 2.0).sqrt() * (1.0 + 1e-12);
+            rise / dmax
+        }
+    };
+
+    // Walk the steps near to far, skipping whole ranges the bound rules out.
+    let mut stack = [(0i64, 0i64); 64];
+    stack[0] = (0, n + 1);
+    let mut top = 1;
+    while top > 0 {
+        top -= 1;
+        let (a, b) = stack[top];
+        if b - a <= 4 {
+            for i in a..b {
+                if visit(i) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if bound(a, b) < skip_below {
+            continue;
+        }
+        let mid = (a + b) / 2;
+        stack[top] = (mid, b);
+        stack[top + 1] = (a, mid);
+        top += 2;
     }
     true
 }

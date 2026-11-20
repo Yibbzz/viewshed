@@ -1,0 +1,38 @@
+{
+  "viewshed r1000 flat": {
+    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "output": "a13180e8697d517ad3930fa633c7aea8c8b822f2932da3e4a4ca48e4fe53aeaf"
+  },
+  "viewshed r1000 target 1.5 curved": {
+    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "output": "cd675836cbf45532bcd8e974b722fb89ad6a148c03761ecc5be659bbd86c5c70"
+  },
+  "viewshed full raster curved": {
+    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "output": "628e93d1f161d95afbda312b167d07473581beb5b16b5fff6cde9740bba7f4d0"
+  },
+  "ztv forward flat10": {
+    "input": "0b253a248085d369ac6f0bdf85374fac176debb11284ce6d96adf3498f6d8a7e",
+    "output": "955b3726e105add5f2ea7208927136215b9e4eb1afa4e175488a381823bedea3"
+  },
+  "ztv reciprocal flat10": {
+    "input": "0b253a248085d369ac6f0bdf85374fac176debb11284ce6d96adf3498f6d8a7e",
+    "output": "00ac4df6a9ca2fd4d01b21c204eaa01a01925fd8b13df22200463225cb9c9fe0"
+  },
+  "ztv forward rough50curv": {
+    "input": "416997256ca252f2de7599554d4857f64574d771bb72b4f5a211df7a8e438eb9",
+    "output": "41162add3e7c5dbce819bf1b81c8b1b9fecfdc7da3db1739d4f27c37a6a95895"
+  },
+  "ztv reciprocal rough50curv": {
+    "input": "416997256ca252f2de7599554d4857f64574d771bb72b4f5a211df7a8e438eb9",
+    "output": "3e13de016412229c759dfbc3a25f5fbc4375588fe5cdec457053c10be25d8123"
+  },
+  "ztv forward holes": {
+    "input": "f6d4a4abb2ef817d330ecd9014d9c4cd8dac822ab728d7e2b799dac180ca1128",
+    "output": "e2accfa6def8d245c1a2d2d2a51ad258c34bac585c7d59b7f48a2f4e52d017d3"
+  },
+  "ztv reciprocal holes": {
+    "input": "f6d4a4abb2ef817d330ecd9014d9c4cd8dac822ab728d7e2b799dac180ca1128",
+    "output": "7e1b072c777fed7d156db61dab99651c736638ff638b6f391a654320683556d0"
+  }
+}
