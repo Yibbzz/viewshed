@@ -2,7 +2,7 @@
 name = "viewshed"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.80"
 description = "Fast, exact line-of-sight viewsheds. 0.0.x is the reference implementation."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -10,3 +10,4 @@ keywords = ["viewshed", "gis", "visibility", "line-of-sight", "terrain"]
 categories = ["science::geo", "algorithms"]
 
 [dependencies]
+rayon = "1"

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "viewshed-conformance"
+version = "0.0.0"
+description = "Compares viewshed tools against exact line-of-sight oracles and analytic scenes. Not published."
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+dependencies = ["numpy>=1.21"]
+
+[project.optional-dependencies]
+tools = ["gdal"]
+
+[tool.setuptools]
+packages = ["conformance"]

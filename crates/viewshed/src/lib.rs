@@ -1,19 +1,21 @@
 //! Fast, exact line-of-sight viewsheds.
 //!
-//! **Version 0.0.x is the reference implementation:** a straightforward,
-//! correct line-of-sight check from the observer to every cell. It is slow
-//! (each cell is checked separately) and meant for small rasters and for
-//! testing. The fast sweep-line algorithm will keep the same API and results.
+//! # Surface models
 //!
-//! # Surface model
+//! [`Surface::RViewshed`] (the default) is the model GRASS `r.viewshed` uses,
+//! computed by a radial sweep in O(n log n) and spread over all cores (Rayon).
+//! The observer is snapped to the centre of its cell, and the eye is that
+//! cell's height plus `observer_height`. Every closer cell is reduced to three
+//! samples: its centre, and the two corners that bound it as seen from the
+//! observer, with corner heights averaged from the four cells meeting there.
+//! A target cell (centre + `target_height`) is hidden when a strictly closer
+//! cell's gradient, interpolated in angle at the target's direction, is
+//! strictly steeper. The result matches GRASS 8.4 cell for cell.
 //!
-//! Heights are given at cell centres and the surface between them is
-//! bilinearly interpolated (heights are clamped to the edge cells at the
-//! raster border). The observer's eye is `observer_height` above the surface
-//! at the observer point. A cell is visible when the straight line from the
-//! eye to the point `target_height` above the cell centre stays on or above
-//! the surface. The line is sampled every quarter cell along the way. No-data
-//! cells (NaN) never block a view and are never visible.
+//! [`Surface::Bilinear`] is the slow 0.0.1 reference: bilinear surface between
+//! cell centres, observer at the exact point, sightline sampled every quarter cell.
+//!
+//! No-data cells (NaN) never block a view and are never visible.
 //!
 //! ```
 //! use viewshed::{viewshed, Grid, Options};
@@ -26,6 +28,8 @@
 //! ```
 
 use std::fmt;
+
+mod sweep;
 
 /// Something went wrong before any visibility was computed.
 #[derive(Debug, Clone, PartialEq)]
@@ -129,6 +133,20 @@ impl<'a> Grid<'a> {
     }
 }
 
+/// Which terrain model decides visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Surface {
+    /// GRASS `r.viewshed`'s model (the default): each closer cell is reduced to
+    /// three gradient samples (its centre and the two corners bounding it as seen
+    /// from the observer), interpolated in angle. The observer is snapped to the
+    /// centre of its cell. Computed by a radial sweep in O(n log n).
+    #[default]
+    RViewshed,
+    /// Bilinear surface between cell centres, observer at the exact point.
+    /// Slow reference: each cell's sightline is sampled every quarter cell.
+    Bilinear,
+}
+
 /// Viewshed settings. Heights and distances are in the raster's units.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Options {
@@ -136,11 +154,12 @@ pub struct Options {
     pub target_height: f64,
     /// Horizontal distance limit; cells beyond it are not visible.
     pub max_distance: Option<f64>,
+    pub surface: Surface,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { observer_height: 1.6, target_height: 0.0, max_distance: None }
+        Options { observer_height: 1.6, target_height: 0.0, max_distance: None, surface: Surface::default() }
     }
 }
 
@@ -167,6 +186,13 @@ pub fn line_of_sight(grid: &Grid, eye: [f64; 3], target: [f64; 3]) -> bool {
 ///
 /// Returns one `bool` per cell, row-major, same shape as the grid.
 pub fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
+    match opts.surface {
+        Surface::RViewshed => sweep::viewshed(grid, x, y, opts),
+        Surface::Bilinear => bilinear_viewshed(grid, x, y, opts),
+    }
+}
+
+fn bilinear_viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
     if !grid.inside(x, y) {
         return Err(Error::ObserverOutside);
     }

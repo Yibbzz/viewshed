@@ -6,7 +6,9 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-**0.0.x is the reference implementation:** a simple, correct line-of-sight check to every cell. It's slow and meant for small rasters and testing. The fast sweep-line algorithm will keep the same API and results. See [BRIEF.md](BRIEF.md) for the plan.
+**Rust:** the default is a fast radial sweep over GRASS `r.viewshed`'s surface model, using all cores. It matches GRASS cell for cell. A 1,000-cell radius (4 million cells) takes about 1.9 s on a 4-core laptop, against 8–9 s for `r.viewshed`. The slow bilinear reference from 0.0.1 is still available as `Surface::Bilinear`.
+
+**Python:** still the pure-NumPy bilinear reference from 0.0.1. The Rust core will be exposed to Python through PyO3 bindings next, with the same API. See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every tool is checked.
 
 | Package | Install | Code |
 | --- | --- | --- |
@@ -26,7 +28,7 @@ seen = viewshed.viewshed(dem, gt, observer=(20.5, 20.5), observer_height=1.6)
 
 ## Surface model
 
-Heights at cell centres, bilinearly interpolated between them. A cell is visible when the straight line from the observer's eye to the point `target_height` above the cell centre stays on or above the surface. No-data (NaN) never blocks and is never visible.
+The default is the model GRASS `r.viewshed` uses, so its results can be checked against GRASS. The observer stands at the centre of its cell. Every cell closer than the target is reduced to three height samples: its centre, and the two corners that bound it as seen from the observer, with each corner averaged from the four cells meeting there. A target (its cell centre plus `target_height`) is hidden when a closer cell's gradient, interpolated by angle at the target's direction, is steeper. No-data (NaN) never blocks and is never visible.
 
 ## Licence
 
