@@ -6,7 +6,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-**Rust:** the default is a fast radial sweep over GRASS `r.viewshed`'s surface model, using all cores. It matches GRASS cell for cell. A 1,000-cell radius (4 million cells) takes about 1.9 s on a 4-core laptop, against 8–9 s for `r.viewshed`. The slow bilinear reference from 0.0.1 is still available as `Surface::Bilinear`.
+**Rust:** the default is a fast radial sweep over GRASS `r.viewshed`'s surface model, using all cores. It matches GRASS cell for cell. A 1,000-cell radius (4 million cells) takes about 1.0 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`. The slow bilinear reference from 0.0.1 is still available as `Surface::Bilinear`.
 
 **Python:** still the pure-NumPy bilinear reference from 0.0.1. The Rust core will be exposed to Python through PyO3 bindings next, with the same API. See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every tool is checked.
 

@@ -30,6 +30,9 @@
 use std::fmt;
 
 mod sweep;
+mod ztv;
+
+pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 
 /// Something went wrong before any visibility was computed.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +47,8 @@ pub enum Error {
     ObserverOutside,
     /// There is no height data under the observer.
     ObserverOnNoData,
+    /// The area searched is over 1,000,000 cells across (set `max_distance`).
+    TooLarge,
 }
 
 impl fmt::Display for Error {
@@ -56,6 +61,7 @@ impl fmt::Display for Error {
             Error::NonSquareCells => write!(f, "cells must be square with a non-zero size"),
             Error::ObserverOutside => write!(f, "the observer is outside the raster"),
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
+            Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
         }
     }
 }

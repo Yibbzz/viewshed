@@ -9,7 +9,18 @@ python -m pytest tests                 # the suite's own tests
 python -m conformance.run --quick      # ~1 min
 python -m conformance.run --out report.md
 python -m conformance.bench --grass    # single-observer speed, 1,000-cell radius
+python -m conformance.ztv_bench        # wind-farm ZTV, every cell an observer
+python -m conformance.ztv_bench --cells 401 --relief 3 --truth   # vs true visibility
 ```
+
+## Wind-farm ZTV (`ztv_bench.py`)
+
+A synthetic landscape with turbines on a ridge, every cell an observer. It
+times both ZTV methods in the crate, *forward* (every cell looks at every blade
+tip: the definition) and *reciprocal* (one viewshed from each tip, the usual
+shortcut), and reports where they disagree. With `--truth` the landscape is a
+smooth mathematical surface, and both are compared with true visibility on it
+(each sightline sampled every 5 m in NumPy, so allow a few minutes).
 
 ## Baselines
 

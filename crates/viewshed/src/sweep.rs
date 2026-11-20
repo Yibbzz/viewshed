@@ -32,44 +32,50 @@
 //! (atan is monotone), and the real angles and gradients are computed only
 //! for the cells a query actually examines, with the same formulas as the
 //! model, so results are bit-for-bit those of a direct evaluation.
+//!
+//! The circle is cut into sectors at fixed key values and each sector is
+//! gathered, sorted and swept by one thread, so no array of all cells or all
+//! events is ever built.
 
+#[cfg(test)]
 use std::cmp::Ordering;
 use std::f64::consts::PI;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use rayon::prelude::*;
 
 use crate::{Error, Grid, Options};
 
 /// Directions in doubled index units (so corners are integers), y pointing north.
-type Dir = (i64, i64);
+pub(crate) type Dir = (i64, i64);
 
 /// One cell's three samples. 40 bytes; everything else is derived.
 #[derive(Clone, Copy)]
-struct Cell {
-    slope: [f64; 3], // dz / distance at ENTER, centre, EXIT
-    dr: i32,         // offset from the observer cell, rows (south +)
-    dc: i32,         // and columns
-    ring: u32,       // floor of the distance in cells; u32::MAX = no cell (no data or out of range)
+pub(crate) struct Cell {
+    pub(crate) slope: [f64; 3], // dz / distance at ENTER, centre, EXIT
+    pub(crate) dr: i32,         // offset from the observer cell, rows (south +)
+    pub(crate) dc: i32,         // and columns
+    pub(crate) ring: u32,       // floor of the distance in cells; u32::MAX = no cell (no data or out of range)
 }
 
 impl Cell {
-    const NONE: Cell = Cell { slope: [0.0; 3], dr: 0, dc: 0, ring: u32::MAX };
+    pub(crate) const NONE: Cell = Cell { slope: [0.0; 3], dr: 0, dc: 0, ring: u32::MAX };
 
-    fn key(&self) -> i64 {
+    pub(crate) fn key(&self) -> i64 {
         let (dr, dc) = (self.dr as i64, self.dc as i64);
         dr * dr + dc * dc
     }
 
-    fn hi(&self) -> f64 {
+    pub(crate) fn hi(&self) -> f64 {
         self.slope[0].max(self.slope[1]).max(self.slope[2])
     }
 
-    fn lo(&self) -> f64 {
+    pub(crate) fn lo(&self) -> f64 {
         self.slope[0].min(self.slope[1]).min(self.slope[2])
     }
 
     /// Exact direction of sample `slot` (0 = ENTER, 1 = centre, 2 = EXIT).
-    fn dir(&self, slot: usize) -> Dir {
+    pub(crate) fn dir(&self, slot: usize) -> Dir {
         let (dr, dc) = (self.dr as i64, self.dc as i64);
         let (oc, or) = match slot {
             1 => (0, 0),
@@ -89,17 +95,18 @@ struct Event {
     cell: u32,
 }
 
-impl Event {
-    fn new(cell: &Cell, i: u32, kind: u8) -> Self {
-        let bits = pseudo_angle(cell.dir(2 - kind as usize)).to_bits();
-        Event { key: (bits & !3) | kind as u64, cell: i }
-    }
+/// The sort key of one of a cell's events (see [`Event::key`]).
+fn event_key(cell: &Cell, kind: u8) -> u64 {
+    (pseudo_angle(cell.dir(2 - kind as usize)).to_bits() & !3) | kind as u64
+}
 
+impl Event {
     fn kind(&self) -> u8 {
         (self.key & 3) as u8
     }
 }
 
+#[cfg(test)]
 fn half(d: Dir) -> u8 {
     if d.1 > 0 || (d.1 == 0 && d.0 > 0) {
         0
@@ -109,6 +116,7 @@ fn half(d: Dir) -> u8 {
 }
 
 /// Counter-clockwise order from east, exact.
+#[cfg(test)]
 fn cmp_dir(a: Dir, b: Dir) -> Ordering {
     half(a).cmp(&half(b)).then_with(|| {
         let cross = a.0 as i128 * b.1 as i128 - a.1 as i128 * b.0 as i128;
@@ -145,7 +153,7 @@ fn angle(d: Dir) -> f64 {
 }
 
 /// ENTER and EXIT corners as (d_col, d_row) offsets in half cells, row growing south.
-fn corners(dr: i64, dc: i64) -> [(i64, i64); 2] {
+pub(crate) fn corners(dr: i64, dc: i64) -> [(i64, i64); 2] {
     match (dr.signum(), dc.signum()) {
         (-1, -1) => [(1, -1), (-1, 1)],
         (-1, 0) => [(1, 1), (-1, 1)],
@@ -164,7 +172,7 @@ fn corners(dr: i64, dc: i64) -> [(i64, i64); 2] {
 /// interpolation can move gradients by a few ulp; this margin is worth more
 /// than 40 ulp of gradient. Very steep targets (only right next to the
 /// observer) get no shortcuts and are checked cell by cell.
-fn margin(st: f64) -> f64 {
+pub(crate) fn margin(st: f64) -> f64 {
     if st.abs() <= 1e6 {
         1e-14 * (1.0 + st * st)
     } else {
@@ -184,18 +192,18 @@ struct RingTree {
 }
 
 /// The target of one query, with its angle and gradient computed on first use.
-struct Target {
-    dir: Dir,
-    key: i64,
-    ring: usize,
-    slope: f64,
-    theta: Option<f64>,
-    grad: f64,
+pub(crate) struct Target {
+    pub(crate) dir: Dir,
+    pub(crate) key: i64,
+    pub(crate) ring: usize,
+    pub(crate) slope: f64,
+    pub(crate) theta: Option<f64>,
+    pub(crate) grad: f64,
 }
 
 impl Target {
     /// Does `cell` block it? Evaluated exactly as the model states.
-    fn blocked_by(&mut self, cell: &Cell) -> bool {
+    pub(crate) fn blocked_by(&mut self, cell: &Cell) -> bool {
         let theta = match self.theta {
             Some(t) => t,
             None => {
@@ -322,7 +330,6 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     }
     let eye = zv + opts.observer_height;
     let res = grid.res();
-    let z = |r: i64, c: i64| grid.at(r as usize, c as usize);
 
     // Only the window within max_distance is visited.
     let reach = opts.max_distance.map(|m| (m / res).floor() as i64 + 1);
@@ -331,158 +338,167 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
 
     let max_d = opts.max_distance;
     let make = |r: i64, c: i64| -> Cell {
-        let (dr, dc) = (r - rv, c - cv);
-        let zc = z(r, c);
-        if (dr == 0 && dc == 0) || zc.is_nan() {
+        let cell = cell_at(grid, rv, cv, eye, r, c);
+        if cell.ring != u32::MAX && max_d.map_or(false, |m| (cell.key() as f64).sqrt() * res > m) {
             return Cell::NONE;
-        }
-        let key = dr * dr + dc * dc;
-        // sqrt of an exact integer: correctly rounded, and much faster than hypot
-        let dist = (key as f64).sqrt() * res;
-        if max_d.map_or(false, |m| dist > m) {
-            return Cell::NONE;
-        }
-        let mut ring = (key as f64).sqrt() as i64;
-        while ring * ring > key {
-            ring -= 1;
-        }
-        while (ring + 1) * (ring + 1) <= key {
-            ring += 1;
-        }
-        let [enter, exit] = corners(dr, dc);
-        let mut cell = Cell { slope: [0.0; 3], dr: dr as i32, dc: dc as i32, ring: ring as u32 };
-        cell.slope[1] = (zc - eye) / dist;
-        for (j, (oc, or)) in [(0usize, enter), (2, exit)] {
-            let (pc, pr) = (2 * dc + oc, 2 * dr + or);
-            let (rr, cc) = (r + or.signum(), c + oc.signum());
-            let h = if rr < 0 || cc < 0 || rr >= rows || cc >= cols {
-                zc
-            } else {
-                let v = [zc, z(r, cc), z(rr, c), z(rr, cc)];
-                if v.iter().any(|q| q.is_nan()) {
-                    zc
-                } else {
-                    (v[0] + v[1] + v[2] + v[3]) / 4.0
-                }
-            };
-            let d = ((pc * pc + pr * pr) as f64 / 4.0).sqrt() * res;
-            cell.slope[j] = (h - eye) / d;
         }
         cell
     };
-    // One slot per cell of the window, filled in parallel by rows.
-    let width = (c1 - c0 + 1) as usize;
-    let mut cells = vec![Cell::NONE; width * (r1 - r0 + 1) as usize];
-    cells.par_chunks_mut(width).enumerate().for_each(|(k, row)| {
-        for (j, slot) in row.iter_mut().enumerate() {
-            *slot = make(r0 + k as i64, c0 + j as i64);
-        }
-    });
-    let rings = cells.iter().filter(|c| c.ring != u32::MAX).map(|c| c.ring as usize + 1).max().unwrap_or(1);
-
-    // Three events per window slot; empty slots get key +inf, sort last, and are cut off.
-    let mut events = vec![Event { key: u64::MAX, cell: 0 }; 3 * cells.len()];
-    events.par_chunks_mut(3).zip(cells.par_iter()).enumerate().for_each(|(i, (ev, c))| {
-        if c.ring != u32::MAX {
-            for (e, kind) in ev.iter_mut().zip([2u8, 1, 0]) {
-                *e = Event::new(c, i as u32, kind);
-            }
-        }
-    });
-    let n_events = 3 * cells.iter().filter(|c| c.ring != u32::MAX).count();
     let n_half = 2 * (r1 - r0).max(c1 - c0) + 2;
-    if n_half < PSEUDO_ANGLE_LIMIT {
-        events.par_sort_unstable_by_key(|e| e.key);
-    } else {
-        events.par_sort_unstable_by(|a, b| {
-            let da = cells[a.cell as usize].dir(2 - a.kind() as usize);
-            let db = cells[b.cell as usize].dir(2 - b.kind() as usize);
-            cmp_dir(da, db).then(a.kind().cmp(&b.kind()))
-        });
+    if n_half >= PSEUDO_ANGLE_LIMIT {
+        return Err(Error::TooLarge);
     }
-    events.truncate(n_events);
-
-    // Split the circle into sectors of equal event counts. A cheap first pass
-    // records which cells are active at each sector's start; then the sectors
-    // are swept in parallel, each with its own tree. Same order, same answers.
-    let n_sec = (rayon::current_num_threads() * 4).clamp(1, events.len().max(1));
-    let bounds: Vec<usize> = (0..=n_sec).map(|k| k * events.len() / n_sec).collect();
-    let mut pos = vec![u32::MAX; cells.len()];
-    let mut active: Vec<u32> = Vec::new();
-    let add = |active: &mut Vec<u32>, pos: &mut Vec<u32>, i: u32| {
-        if pos[i as usize] == u32::MAX {
-            pos[i as usize] = active.len() as u32;
-            active.push(i);
-        }
+    let rings = {
+        let (fr, fc) = ((rv - r0).max(r1 - rv), (cv - c0).max(c1 - cv));
+        ((fr * fr + fc * fc) as f64).sqrt() as usize + 2
     };
-    // Cells straddling the start direction (east of V on its row) begin active.
-    for (i, c) in cells.iter().enumerate() {
-        if c.ring != u32::MAX && c.dr == 0 && c.dc > 0 {
-            add(&mut active, &mut pos, i as u32);
-        }
-    }
-    let mut starts = Vec::with_capacity(n_sec);
-    for k in 0..n_sec {
-        starts.push(active.clone());
-        for ev in &events[bounds[k]..bounds[k + 1]] {
-            match ev.kind() {
-                2 => add(&mut active, &mut pos, ev.cell),
-                0 => {
-                    let p = pos[ev.cell as usize];
-                    if p != u32::MAX {
-                        let last = *active.last().unwrap();
-                        active.swap_remove(p as usize);
-                        if last != ev.cell {
-                            pos[last as usize] = p;
-                        }
-                        pos[ev.cell as usize] = u32::MAX;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
 
+    // The circle is cut into sectors at fixed key values, and each sector is
+    // swept start to finish by one thread: it gathers the cells of its wedge,
+    // sorts its own events and sweeps them. A sector sees exactly the events
+    // in its key range, starting from exactly the cells active there, so the
+    // result is that of one sweep around the circle, with no global arrays.
+    let n_sec = (rayon::current_num_threads() * 16).max(64);
+    let bound = |k: usize| -> (u64, f64) {
+        let p = 4.0 * k as f64 / n_sec as f64;
+        (p.to_bits() & !3, p)
+    };
+    let out: Vec<AtomicBool> = (0..grid.rows * grid.cols).map(|_| AtomicBool::new(false)).collect();
     let th = opts.target_height;
-    let results: Vec<Vec<(usize, bool)>> = (0..n_sec)
-        .into_par_iter()
-        .map(|k| {
-            let mut tree = RingTree::new(rings);
-            for &i in &starts[k] {
-                tree.insert(cells[i as usize].ring as usize, i, &cells);
-            }
-            let mut found = Vec::new();
-            for ev in &events[bounds[k]..bounds[k + 1]] {
-                let cell = &cells[ev.cell as usize];
-                match ev.kind() {
-                    2 => tree.insert(cell.ring as usize, ev.cell, &cells),
-                    0 => tree.remove(cell.ring as usize, ev.cell, &cells),
-                    _ => {
-                        let idx = ((rv + cell.dr as i64) * cols + cv + cell.dc as i64) as usize;
-                        let key = cell.key();
-                        let dist = (key as f64).sqrt() * res;
-                        let mut target = Target {
-                            dir: cell.dir(1),
-                            key,
-                            ring: cell.ring as usize,
-                            slope: (grid.z[idx] + th - eye) / dist,
-                            theta: None,
-                            grad: 0.0,
-                        };
-                        found.push((idx, !tree.blocked(&cells, &mut target)));
+    (0..n_sec).into_par_iter().for_each(|k| {
+        let ((bs, ps), (be, pe)) = (bound(k), bound(k + 1));
+        let (us, ue) = (direction_of(ps), direction_of(pe));
+        // Constraints a x + b y >= 0 that define the wedge (x east, y north).
+        let planes = [(-us.1, us.0), (ue.1, -ue.0)];
+        let mut cells: Vec<Cell> = Vec::new();
+        let mut events: Vec<Event> = Vec::new();
+        let mut start: Vec<u32> = Vec::new();
+        for r in r0..=r1 {
+            let Some((xlo, xhi)) = row_span(planes, -(r - rv) as f64) else { continue };
+            let lo = ((xlo - 1.5).floor() as i64 + cv).max(c0);
+            let hi = ((xhi + 1.5).ceil() as i64 + cv).min(c1);
+            for c in lo..=hi {
+                let cell = make(r, c);
+                if cell.ring == u32::MAX {
+                    continue;
+                }
+                let keys = [event_key(&cell, 2), event_key(&cell, 1), event_key(&cell, 0)];
+                let (enter, exit) = (keys[0], keys[2]);
+                // Cells straddling the start direction (east of V on its row) wrap.
+                let active = if enter > exit { bs <= exit || enter < bs } else { enter < bs && bs <= exit };
+                let first = events.len();
+                let i = cells.len() as u32;
+                events.extend(keys.iter().filter(|&&key| bs <= key && key < be).map(|&key| Event { key, cell: i }));
+                if active || events.len() > first {
+                    cells.push(cell);
+                    if active {
+                        start.push(i);
                     }
                 }
             }
-            found
-        })
-        .collect();
+        }
+        events.sort_unstable_by_key(|e| e.key);
+        let mut tree = RingTree::new(rings);
+        for &i in &start {
+            tree.insert(cells[i as usize].ring as usize, i, &cells);
+        }
+        for ev in &events {
+            let cell = &cells[ev.cell as usize];
+            match ev.kind() {
+                2 => tree.insert(cell.ring as usize, ev.cell, &cells),
+                0 => tree.remove(cell.ring as usize, ev.cell, &cells),
+                _ => {
+                    let idx = ((rv + cell.dr as i64) * cols + cv + cell.dc as i64) as usize;
+                    let key = cell.key();
+                    let dist = (key as f64).sqrt() * res;
+                    let mut target = Target {
+                        dir: cell.dir(1),
+                        key,
+                        ring: cell.ring as usize,
+                        slope: (grid.z[idx] + th - eye) / dist,
+                        theta: None,
+                        grad: 0.0,
+                    };
+                    out[idx].store(!tree.blocked(&cells, &mut target), AtomicOrdering::Relaxed);
+                }
+            }
+        }
+    });
+    out[(rv * cols + cv) as usize].store(true, AtomicOrdering::Relaxed);
+    Ok(out.into_iter().map(AtomicBool::into_inner).collect())
+}
 
-    let mut out = vec![false; grid.rows * grid.cols];
-    out[(rv * cols + cv) as usize] = true;
-    for (idx, v) in results.into_iter().flatten() {
-        out[idx] = v;
+/// Cell (r, c) as seen from the eye at height `eye` over the centre of cell
+/// (rv, cv): its three slopes. `Cell::NONE` for the observer's own cell and no-data.
+pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, r: i64, c: i64) -> Cell {
+    let (rows, cols) = (grid.rows as i64, grid.cols as i64);
+    let z = |r: i64, c: i64| grid.at(r as usize, c as usize);
+    let res = grid.res();
+    let (dr, dc) = (r - rv, c - cv);
+    let zc = z(r, c);
+    if (dr == 0 && dc == 0) || zc.is_nan() {
+        return Cell::NONE;
     }
-    Ok(out)
+    let key = dr * dr + dc * dc;
+    // sqrt of an exact integer: correctly rounded, and much faster than hypot
+    let dist = (key as f64).sqrt() * res;
+    let mut ring = (key as f64).sqrt() as i64;
+    while ring * ring > key {
+        ring -= 1;
+    }
+    while (ring + 1) * (ring + 1) <= key {
+        ring += 1;
+    }
+    let [enter, exit] = corners(dr, dc);
+    let mut cell = Cell { slope: [0.0; 3], dr: dr as i32, dc: dc as i32, ring: ring as u32 };
+    cell.slope[1] = (zc - eye) / dist;
+    for (j, (oc, or)) in [(0usize, enter), (2, exit)] {
+        let (pc, pr) = (2 * dc + oc, 2 * dr + or);
+        let (rr, cc) = (r + or.signum(), c + oc.signum());
+        let h = if rr < 0 || cc < 0 || rr >= rows || cc >= cols {
+            zc
+        } else {
+            let v = [zc, z(r, cc), z(rr, c), z(rr, cc)];
+            if v.iter().any(|q| q.is_nan()) {
+                zc
+            } else {
+                (v[0] + v[1] + v[2] + v[3]) / 4.0
+            }
+        };
+        let d = ((pc * pc + pr * pr) as f64 / 4.0).sqrt() * res;
+        cell.slope[j] = (h - eye) / d;
+    }
+    cell
+}
+
+/// A direction (x east, y north) with the given pseudo_angle; inverse of `pseudo_angle`.
+fn direction_of(p: f64) -> (f64, f64) {
+    let q = p.floor().min(3.0);
+    let t = p - q;
+    match q as i64 {
+        0 => (1.0 - t, t),
+        1 => (-t, 1.0 - t),
+        2 => (-(1.0 - t), -t),
+        _ => (t, -(1.0 - t)),
+    }
+}
+
+/// The x range (in cells from the observer) of the wedge on the row whose centre
+/// is at height `y` (north +), over the row's full height; None if it misses.
+/// Generous: callers pad it and check every cell exactly.
+fn row_span(planes: [(f64, f64); 2], y: f64) -> Option<(f64, f64)> {
+    let (ya, yb) = (y - 0.5, y + 0.5);
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    for (a, b) in planes {
+        if a > 0.0 {
+            lo = lo.max((-b * ya / a).min(-b * yb / a));
+        } else if a < 0.0 {
+            hi = hi.min((-b * ya / a).max(-b * yb / a));
+        } else if (b * ya).max(b * yb) < 0.0 {
+            return None;
+        }
+    }
+    (lo <= hi).then_some((lo.max(-1e9), hi.min(1e9)))
 }
 
 #[cfg(test)]
