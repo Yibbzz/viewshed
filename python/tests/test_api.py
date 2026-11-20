@@ -1,0 +1,115 @@
+"""The public API: types, shapes, defaults and errors. Accuracy is checked
+cell by cell against the oracles and GRASS in ../conformance."""
+
+import threading
+
+import numpy as np
+import pytest
+
+import viewshed
+
+GT = (0.0, 1.0, 0.0, 41.0, 0.0, -1.0)
+
+
+def wall():
+    z = np.zeros((41, 41))
+    z[15, :] = 5.0
+    return z
+
+
+def test_returns_a_bool_mask_shaped_like_the_dem():
+    seen = viewshed.viewshed(wall(), GT, (20.5, 20.5))
+    assert seen.dtype == bool and seen.shape == (41, 41)
+    assert seen[16, 20] and seen[15, 20] and seen[30, 20] and not seen[5, 20]
+
+
+def test_float32_and_non_contiguous_input_give_the_same_answer():
+    z = wall()
+    base = viewshed.viewshed(z, GT, (20.5, 20.5))
+    assert (viewshed.viewshed(z.astype(np.float32), GT, (20.5, 20.5)) == base).all()
+    big = np.zeros((41, 82))
+    big[:, ::2] = z
+    assert (viewshed.viewshed(big[:, ::2], GT, (20.5, 20.5)) == base).all()
+    assert (viewshed.viewshed(z.tolist(), list(GT), [20.5, 20.5]) == base).all()
+
+
+def test_options():
+    z = wall()
+    assert viewshed.viewshed(z, GT, (20.5, 20.5), observer_height=50.0)[5, 20]
+    # a 10 m target 15 m away is hidden by the 5 m wall 5 m away (sightline 4.4 m there);
+    # a 20 m one is not (7.7 m)
+    assert not viewshed.viewshed(z, GT, (20.5, 20.5), target_height=10.0)[5, 20]
+    assert viewshed.viewshed(z, GT, (20.5, 20.5), target_height=20.0)[5, 20]
+    near = viewshed.viewshed(z, GT, (20.5, 20.5), max_distance=10.0)
+    assert near[20, 25] and not near[20, 35]
+    ref = viewshed.viewshed(z, GT, (20.5, 20.5), surface="bilinear", curvature=False)
+    assert ref[16, 20] and not ref[5, 20]
+
+
+def test_curvature_sets_the_horizon_on_flat_ground():
+    k, h = 0.13, 1.6
+    radius = (1 - k) * 10.5 ** 2 / (2 * h)        # horizon at 10.5 cells
+    seen = viewshed.viewshed(np.zeros((41, 41)), GT, (20.5, 20.5), observer_height=h,
+                             refraction=k, earth_radius=radius)
+    assert seen[20, 29] and not seen[20, 32]
+    assert viewshed.viewshed(np.zeros((41, 41)), GT, (20.5, 20.5), earth_radius=radius,
+                             curvature=False).all()
+
+
+def test_ztv_counts_and_methods():
+    z = wall()
+    targets = [(20.5, 20.5, 30.0), (20.5, 3.5, 2.0)]
+    fwd = viewshed.ztv(z, GT, targets)
+    rec = viewshed.ztv(z, GT, targets, method="reciprocal")
+    assert fwd.dtype == np.uint32 and fwd.shape == (41, 41)
+    assert fwd.max() == 2 and (fwd <= 2).all()
+    assert (fwd != rec).mean() < 0.05
+
+
+def test_nodata():
+    z = wall()
+    z[0, 0] = np.nan
+    assert not viewshed.viewshed(z, GT, (20.5, 20.5))[0, 0]
+    with pytest.raises(ValueError, match="no height data"):
+        viewshed.viewshed(z, GT, (0.5, 40.5))
+
+
+@pytest.mark.parametrize("kwargs, match", [
+    (dict(transform=(0, 1, 0.1, 41, 0, -1)), "rotated"),
+    (dict(transform=(0, 1, 0, 41, 0, -2)), "square"),
+    (dict(observer=(100.0, 0.0)), "outside"),
+    (dict(observer_height=-1.0), "observer_height"),
+    (dict(max_distance=0.0), "max_distance"),
+    (dict(surface="nope"), "surface"),
+    (dict(dem=np.zeros(5)), "2-D"),
+])
+def test_errors(kwargs, match):
+    args = dict(dem=np.zeros((41, 41)), transform=GT, observer=(20.5, 20.5))
+    args.update(kwargs)
+    with pytest.raises(ValueError, match=match):
+        viewshed.viewshed(**args)
+
+
+def test_ztv_errors():
+    with pytest.raises(ValueError, match="method"):
+        viewshed.ztv(np.zeros((9, 9)), (0, 1, 0, 9, 0, -1), [(4.5, 4.5, 1.0)], method="nope")
+    with pytest.raises(ValueError, match="outside"):
+        viewshed.ztv(np.zeros((9, 9)), (0, 1, 0, 9, 0, -1), [(40.5, 4.5, 1.0)])
+
+
+def test_runs_in_parallel_threads():
+    # the GIL is released, so threads can call it at the same time
+    z = np.random.default_rng(0).normal(0, 3, (201, 201)).cumsum(0)
+    gt = (0.0, 1.0, 0.0, 201.0, 0.0, -1.0)
+    expected = viewshed.viewshed(z, gt, (100.5, 100.5))
+    results = [None] * 4
+
+    def work(i):
+        results[i] = viewshed.viewshed(z, gt, (100.5, 100.5))
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert all((r == expected).all() for r in results)

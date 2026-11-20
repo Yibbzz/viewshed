@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
 from conformance import oracle  # noqa: E402
-import viewshed  # noqa: E402
+from viewshed import reference  # noqa: E402
 
 GT = (0.0, 1.0, 0.0, 31.0, 0.0, -1.0)
 OBS = (15.5, 15.5)
@@ -49,6 +49,6 @@ def test_reference_implementation_mostly_agrees():
     rng = np.random.default_rng(1)
     z = np.cumsum(np.cumsum(rng.normal(0, 0.3, (31, 31)), 0), 1) / 5
     ours, _, _ = oracle.viewshed(z, GT, OBS)
-    ref = viewshed.viewshed(z, GT, OBS)
+    ref = reference.viewshed(z, GT, OBS)
     assert 0.1 < ours.mean() < 0.95
-    assert (ours == ref).mean() > 0.98   # the 0.0.1 reference samples every 1/4 cell
+    assert (ours == ref).mean() > 0.98   # the NumPy reference samples every 1/4 cell

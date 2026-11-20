@@ -1,6 +1,7 @@
 //! Viewshed of a raw little-endian f64 raster, for the conformance suite.
 //! Usage: raw_viewshed <heights.f64> <rows> <cols> <x0> <res> <y0> <ox> <oy> <obs_h> <out.u8>
 //!        [target_h] [max_distance, negative = none] [rviewshed|bilinear]
+//!        [curvature 0|1] [refraction] [earth_radius]   (curvature is off unless given)
 //! Prints the computation time in seconds (excluding file I/O) on stdout.
 use std::{env, fs, time::Instant};
 use viewshed::{viewshed, Grid, Options, Surface};
@@ -12,7 +13,7 @@ fn main() {
     let p = |i: usize| a[i].parse::<f64>().unwrap();
     let (rows, cols) = (a[2].parse().unwrap(), a[3].parse().unwrap());
     let grid = Grid::new(&z, rows, cols, [p(4), p(5), 0.0, p(6), 0.0, -p(5)]).unwrap();
-    let mut opts = Options { observer_height: p(9), ..Options::default() };
+    let mut opts = Options { observer_height: p(9), curvature: false, ..Options::default() };
     if a.len() > 11 {
         opts.target_height = p(11);
     }
@@ -21,6 +22,11 @@ fn main() {
     }
     if a.len() > 13 && a[13] == "bilinear" {
         opts.surface = Surface::Bilinear;
+    }
+    if a.len() > 16 {
+        opts.curvature = a[14] == "1";
+        opts.refraction = p(15);
+        opts.earth_radius = p(16);
     }
     let t = Instant::now();
     let seen = viewshed(&grid, p(7), p(8), &opts).unwrap();

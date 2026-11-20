@@ -27,7 +27,7 @@ import math
 
 import numpy as np
 
-VERSION = "rviewshed-1"
+VERSION = "rviewshed-2"   # 2: earth curvature and refraction
 
 # (sign of d_row, sign of d_col) -> (ENTER (d_col, d_row), EXIT (d_col, d_row)), row grows south
 _CORNERS = {
@@ -59,7 +59,11 @@ def _corner_height(z, r, c, oc, orow):
     return sum(vals) / 4
 
 
-def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0, max_distance=None):
+def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0, max_distance=None,
+             curvature=False, refraction=0.13, earth_radius=6371008.8):
+    """Visibility of every cell under the r.viewshed model. With `curvature`, each
+    sample (centre or corner, after averaging) and the target are lowered by
+    d^2 / (2 R) * (1 - refraction) at their own distance d from the observer."""
     z = np.asarray(z, dtype=float)
     rows, cols = z.shape
     res = abs(transform[1])
@@ -70,6 +74,7 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0, max
     if not (0 <= rv < rows and 0 <= cv < cols) or math.isnan(z[rv, cv]):
         raise ValueError("observer outside the raster or on no-data")
     eye = z[rv, cv] + observer_height
+    drop = (1.0 - refraction) / (2.0 * earth_radius) if curvature else 0.0
 
     rr, cc = np.nonzero(~np.isnan(z))
     keep = ~((rr == rv) & (cc == cv))
@@ -84,14 +89,15 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0, max
     g = np.empty((n, 3))
     zc = z[rr, cc]
     a[:, 1] = _angle(dc, dr)
-    g[:, 1] = np.arctan((zc - eye) / dist)
+    g[:, 1] = np.arctan((zc - dist * dist * drop - eye) / dist)
     for i in range(n):
         enter, exit_ = _CORNERS[(int(np.sign(dr[i])), int(np.sign(dc[i])))]
         for j, (oc, orow) in ((0, enter), (2, exit_)):
             pc, pr = dc[i] + oc, dr[i] + orow
             a[i, j] = _angle(pc, pr)
             h = _corner_height(z, rr[i], cc[i], oc, orow)
-            g[i, j] = math.atan((h - eye) / (math.sqrt(pc * pc + pr * pr) * res))
+            d = math.sqrt(pc * pc + pr * pr) * res
+            g[i, j] = math.atan((h - d * d * drop - eye) / d)
 
     order = np.argsort(dist, kind="stable")
     rr, cc, dist, a, g, zc = rr[order], cc[order], dist[order], a[order], g[order], zc[order]
@@ -99,7 +105,7 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0, max
     for i in range(n):
         k = np.searchsorted(dist, dist[i], side="left")     # strictly closer cells
         theta = a[i, 1]
-        gt = math.atan((zc[i] + target_height - eye) / dist[i])
+        gt = math.atan((zc[i] - dist[i] * dist[i] * drop + target_height - eye) / dist[i])
         if k == 0:
             visible[rr[i], cc[i]] = True
             continue

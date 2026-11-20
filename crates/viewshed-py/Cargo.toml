@@ -1,0 +1,17 @@
+[package]
+name = "viewshed-py"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+description = "Python bindings for the viewshed crate (built by maturin into the `viewshed` package; not published)."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "_viewshed"
+crate-type = ["cdylib"]
+
+[dependencies]
+numpy = "0.27.1"
+pyo3 = { version = "0.27.2", features = ["abi3-py39"] }
+viewshed = { path = "../viewshed" }

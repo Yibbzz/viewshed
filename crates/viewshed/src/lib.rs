@@ -153,7 +153,8 @@ pub enum Surface {
     Bilinear,
 }
 
-/// Viewshed settings. Heights and distances are in the raster's units.
+/// Viewshed settings. Heights and distances are in the raster's units (metres
+/// when `curvature` is on).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     pub observer_height: f64,
@@ -161,26 +162,66 @@ pub struct Options {
     /// Horizontal distance limit; cells beyond it are not visible.
     pub max_distance: Option<f64>,
     pub surface: Surface,
+    /// Lower every point by the earth's curvature as seen from the observer:
+    /// `d^2 / (2 R) * (1 - refraction)` at horizontal distance `d`, the usual
+    /// surveying correction (as in GRASS `r.viewshed -c -r` and GDAL's `-cc`).
+    pub curvature: bool,
+    /// Refraction coefficient: light bends with the earth, which raises
+    /// distant points by this fraction of the curvature drop. 0.13 is a common
+    /// value for visible light; GRASS defaults to 1/7 (0.14286).
+    pub refraction: f64,
+    /// Earth radius in metres. The default is the IUGG mean radius; GRASS uses
+    /// the semi-major axis of its location's ellipsoid.
+    pub earth_radius: f64,
 }
+
+/// The IUGG mean earth radius, metres.
+pub const MEAN_EARTH_RADIUS: f64 = 6_371_008.8;
 
 impl Default for Options {
     fn default() -> Self {
-        Options { observer_height: 1.6, target_height: 0.0, max_distance: None, surface: Surface::default() }
+        Options {
+            observer_height: 1.6,
+            target_height: 0.0,
+            max_distance: None,
+            surface: Surface::default(),
+            curvature: true,
+            refraction: 0.13,
+            earth_radius: MEAN_EARTH_RADIUS,
+        }
+    }
+}
+
+impl Options {
+    /// The curvature drop at horizontal distance d is `d * d * drop_factor()`.
+    pub(crate) fn drop_factor(&self) -> f64 {
+        if self.curvature {
+            (1.0 - self.refraction) / (2.0 * self.earth_radius)
+        } else {
+            0.0
+        }
     }
 }
 
 const STEPS_PER_CELL: f64 = 4.0;
 const EPS: f64 = 1e-9;
 
-/// True if nothing on the surface rises above the line from `eye` to `target`.
+/// True if nothing on the surface rises above the line from `eye` to `target` (flat earth).
 pub fn line_of_sight(grid: &Grid, eye: [f64; 3], target: [f64; 3]) -> bool {
+    line_of_sight_curved(grid, eye, target, 0.0)
+}
+
+/// As `line_of_sight`, with the surface lowered by `d * d * drop` at horizontal
+/// distance d from the eye (`target[2]` must already include its own drop).
+fn line_of_sight_curved(grid: &Grid, eye: [f64; 3], target: [f64; 3], drop: f64) -> bool {
     let (dx, dy) = (target[0] - eye[0], target[1] - eye[1]);
     let horiz = (dx * dx + dy * dy).sqrt();
     let n = (horiz / grid.res() * STEPS_PER_CELL).ceil() as usize;
     for i in 1..n {
         let t = i as f64 / n as f64;
         let line_z = eye[2] + t * (target[2] - eye[2]);
-        let surface = grid.height(eye[0] + t * dx, eye[1] + t * dy);
+        let d = t * horiz;
+        let surface = grid.height(eye[0] + t * dx, eye[1] + t * dy) - d * d * drop;
         if surface > line_z + EPS * (1.0 + line_z.abs()) {
             return false; // NaN surface compares false: no-data never blocks
         }
@@ -207,6 +248,7 @@ fn bilinear_viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<
         return Err(Error::ObserverOnNoData);
     }
     let eye = [x, y, ground + opts.observer_height];
+    let drop = opts.drop_factor();
     let mut out = vec![false; grid.rows * grid.cols];
     for r in 0..grid.rows {
         for c in 0..grid.cols {
@@ -215,12 +257,14 @@ fn bilinear_viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<
                 continue;
             }
             let (cx, cy) = grid.centre(r, c);
+            let d2 = (cx - x).powi(2) + (cy - y).powi(2);
             if let Some(max) = opts.max_distance {
-                if ((cx - x).powi(2) + (cy - y).powi(2)).sqrt() > max {
+                if d2.sqrt() > max {
                     continue;
                 }
             }
-            out[r * grid.cols + c] = line_of_sight(grid, eye, [cx, cy, z + opts.target_height]);
+            let tz = z - d2 * drop + opts.target_height;
+            out[r * grid.cols + c] = line_of_sight_curved(grid, eye, [cx, cy, tz], drop);
         }
     }
     Ok(out)
@@ -278,6 +322,23 @@ mod tests {
         assert!(seen[20 * 41 + 25]);
         assert!(!seen[20 * 41 + 35]);
         assert!(!seen[0]);
+    }
+
+    #[test]
+    fn curvature_sets_the_horizon_on_flat_ground() {
+        // horizon at sqrt(h / f) = 10.5 cells, f = (1 - k) / (2 R)
+        let z = flat(0.0);
+        let g = Grid::new(&z, 41, 41, GT).unwrap();
+        let (h, k) = (1.6, 0.13);
+        let r = (1.0 - k) * 10.5 * 10.5 / (2.0 * h);
+        for surface in [Surface::RViewshed, Surface::Bilinear] {
+            let opts = Options { observer_height: h, refraction: k, earth_radius: r, surface, ..Options::default() };
+            let seen = viewshed(&g, 20.5, 20.5, &opts).unwrap();
+            assert!(seen[20 * 41 + 20 + 9], "{surface:?}: within the horizon");
+            assert!(!seen[20 * 41 + 20 + 12], "{surface:?}: beyond the horizon");
+            let flat_earth = Options { curvature: false, ..opts };
+            assert!(viewshed(&g, 20.5, 20.5, &flat_earth).unwrap().iter().all(|&v| v));
+        }
     }
 
     #[test]

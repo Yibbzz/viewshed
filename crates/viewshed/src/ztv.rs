@@ -46,11 +46,35 @@ pub struct ZtvOptions {
     /// Targets farther than this from a cell don't count for it.
     pub max_distance: Option<f64>,
     pub method: ZtvMethod,
+    /// Earth curvature and refraction, as in [`Options`].
+    pub curvature: bool,
+    pub refraction: f64,
+    pub earth_radius: f64,
 }
 
 impl Default for ZtvOptions {
     fn default() -> Self {
-        ZtvOptions { observer_height: 2.0, max_distance: None, method: ZtvMethod::default() }
+        let o = Options::default();
+        ZtvOptions {
+            observer_height: 2.0,
+            max_distance: None,
+            method: ZtvMethod::default(),
+            curvature: o.curvature,
+            refraction: o.refraction,
+            earth_radius: o.earth_radius,
+        }
+    }
+}
+
+impl ZtvOptions {
+    fn view(&self) -> Options {
+        Options {
+            max_distance: self.max_distance,
+            curvature: self.curvature,
+            refraction: self.refraction,
+            earth_radius: self.earth_radius,
+            ..Options::default()
+        }
     }
 }
 
@@ -77,8 +101,8 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
                 let o = Options {
                     observer_height: tg.height,
                     target_height: opts.observer_height,
-                    max_distance: opts.max_distance,
                     surface: Surface::RViewshed,
+                    ..opts.view()
                 };
                 let seen = crate::viewshed(grid, tg.x, tg.y, &o)?;
                 counts.iter_mut().zip(seen).for_each(|(n, v)| *n += v as u32);
@@ -87,6 +111,7 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
         }
         ZtvMethod::Forward => {
             let cols = grid.cols;
+            let drop = opts.view().drop_factor();
             let mut counts = vec![0u32; grid.rows * cols];
             counts.par_chunks_mut(cols).enumerate().for_each(|(r, row)| {
                 for (c, n) in row.iter_mut().enumerate() {
@@ -96,7 +121,7 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
                     }
                     let eye = z + opts.observer_height;
                     for &(rt, ct, h) in &cells {
-                        if sees(grid, r as i64, c as i64, eye, rt, ct, h, opts.max_distance) {
+                        if sees(grid, r as i64, c as i64, eye, drop, rt, ct, h, opts.max_distance) {
                             *n += 1;
                         }
                     }
@@ -114,7 +139,17 @@ fn cross(a: (i64, i64), b: (i64, i64)) -> i128 {
 /// Can the eye over cell (rv, cv) see `height` above the centre of cell (rt, ct)?
 /// Exactly the r.viewshed-model answer a full sweep from (rv, cv) would give.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn sees(grid: &Grid, rv: i64, cv: i64, eye: f64, rt: i64, ct: i64, height: f64, max_d: Option<f64>) -> bool {
+pub(crate) fn sees(
+    grid: &Grid,
+    rv: i64,
+    cv: i64,
+    eye: f64,
+    drop: f64,
+    rt: i64,
+    ct: i64,
+    height: f64,
+    max_d: Option<f64>,
+) -> bool {
     let (dr, dc) = (rt - rv, ct - cv);
     if dr == 0 && dc == 0 {
         return true;
@@ -129,7 +164,7 @@ pub(crate) fn sees(grid: &Grid, rv: i64, cv: i64, eye: f64, rt: i64, ct: i64, he
         dir: (2 * dc, -2 * dr),
         key,
         ring: 0,
-        slope: (zt + height - eye) / dist,
+        slope: (zt - dist * dist * drop + height - eye) / dist,
         theta: None,
         grad: 0.0,
     };
@@ -161,7 +196,7 @@ pub(crate) fn sees(grid: &Grid, rv: i64, cv: i64, eye: f64, rt: i64, ct: i64, he
             if cross(e, target.dir) <= 0 || cross(target.dir, x) <= 0 {
                 continue; // not active in the target's direction
             }
-            let cell = cell_at(grid, rv, cv, eye, r, c);
+            let cell = cell_at(grid, rv, cv, eye, drop, r, c);
             if cell.ring == u32::MAX || cell.hi() < skip_below {
                 continue;
             }
@@ -207,7 +242,15 @@ mod tests {
 
     #[test]
     fn forward_equals_a_full_viewshed_from_every_cell() {
-        for (seed, integer, holes, n) in [(1, false, false, 21), (2, true, false, 19), (3, false, true, 17), (4, true, true, 23)] {
+        // flat earth, then a tiny earth (radius 60 m) so curvature decides many cells
+        for (seed, integer, holes, n, curvature) in [
+            (1, false, false, 21, false),
+            (2, true, false, 19, false),
+            (3, false, true, 17, false),
+            (4, true, true, 23, false),
+            (5, false, false, 21, true),
+            (6, true, true, 19, true),
+        ] {
             let z = terrain(n, seed, integer, holes);
             let gt = [0.0, 1.0, 0.0, n as f64, 0.0, -1.0];
             let grid = Grid::new(&z, n, n, gt).unwrap();
@@ -217,7 +260,7 @@ mod tests {
                     targets.push((r, c, ZtvTarget { x: c as f64 + 0.5, y: (n - r) as f64 - 0.5, height: h }));
                 }
             }
-            let opts = ZtvOptions { observer_height: 1.5, ..ZtvOptions::default() };
+            let opts = ZtvOptions { observer_height: 1.5, curvature, earth_radius: 60.0, ..ZtvOptions::default() };
             let counts = ztv(&grid, &targets.iter().map(|t| t.2).collect::<Vec<_>>(), &opts).unwrap();
             for r in 0..n {
                 for c in 0..n {
@@ -225,7 +268,7 @@ mod tests {
                         assert_eq!(counts[r * n + c], 0);
                         continue;
                     }
-                    let o = Options { observer_height: 1.5, ..Options::default() };
+                    let o = Options { observer_height: 1.5, curvature, earth_radius: 60.0, ..Options::default() };
                     let mut expect = 0;
                     for &(tr, tc, t) in &targets {
                         let v = viewshed(&grid, c as f64 + 0.5, (n - r) as f64 - 0.5, &Options { target_height: t.height, ..o.clone() }).unwrap();

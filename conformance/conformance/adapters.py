@@ -21,6 +21,11 @@ REPO = Path(__file__).resolve().parents[2]
 NODATA = -9999.0
 
 
+# Semi-major axis of the Airy 1830 ellipsoid (EPSG:27700), which GRASS uses as
+# the earth radius in the temporary location the GRASS adapter runs in.
+AIRY_A = 6377563.396
+
+
 @dataclass
 class Job:
     dem: np.ndarray
@@ -29,6 +34,13 @@ class Job:
     observer_height: float
     target_height: float
     max_distance: float = None
+    curvature: bool = False
+    refraction: float = 0.0
+    earth_radius: float = AIRY_A
+
+    def curve_kwargs(self):
+        return dict(curvature=self.curvature, refraction=self.refraction,
+                    earth_radius=self.earth_radius)
 
 
 class Adapter:
@@ -58,7 +70,7 @@ class Oracle(Adapter):
     def run(self, job):
         from . import oracle
         return oracle.viewshed(job.dem, job.gt, job.observer, job.observer_height,
-                               job.target_height, job.max_distance)[0]
+                               job.target_height, job.max_distance, **job.curve_kwargs())[0]
 
 
 class OracleRviewshed(Adapter):
@@ -68,12 +80,13 @@ class OracleRviewshed(Adapter):
     def run(self, job):
         from . import oracle_rviewshed
         return oracle_rviewshed.viewshed(job.dem, job.gt, job.observer, job.observer_height,
-                                         job.target_height, job.max_distance)
+                                         job.target_height, job.max_distance,
+                                         **job.curve_kwargs())
 
 
 class ReferencePy(Adapter):
-    name = "viewshed-py-0.0.1"
-    notes = "pure NumPy reference, samples every 1/4 cell"
+    name = "viewshed-py-reference"
+    notes = "viewshed.reference: pure NumPy bilinear reference, samples every 1/4 cell, flat earth"
 
     def available(self):
         try:
@@ -83,8 +96,27 @@ class ReferencePy(Adapter):
             return False
 
     def run(self, job):
-        return _import_viewshed().viewshed(job.dem, job.gt, job.observer, job.observer_height,
+        if job.curvature:
+            return None         # the NumPy reference has no curvature
+        return _import_viewshed().reference.viewshed(job.dem, job.gt, job.observer, job.observer_height,
                                            job.target_height, job.max_distance)
+
+
+class PythonBindings(Adapter):
+    name = "viewshed-py"
+    notes = "the Python package (Rust core via PyO3), default r.viewshed model"
+
+    def available(self):
+        try:
+            _import_viewshed()
+            return True
+        except ImportError:
+            return False
+
+    def run(self, job):
+        return _import_viewshed().viewshed(
+            job.dem, job.gt, job.observer, job.observer_height, job.target_height,
+            job.max_distance, **job.curve_kwargs())
 
 
 def _import_viewshed():
@@ -128,7 +160,9 @@ class Rust(Adapter):
             p = subprocess.run([str(self._bin), str(src), str(rows), str(cols), repr(j.gt[0]),
                                 repr(j.gt[1]), repr(j.gt[3]), repr(j.observer[0]),
                                 repr(j.observer[1]), repr(j.observer_height), str(dst),
-                                repr(j.target_height), repr(md), self.surface],
+                                repr(j.target_height), repr(md), self.surface,
+                                "1" if j.curvature else "0", repr(j.refraction),
+                                repr(j.earth_radius)],
                                check=True, capture_output=True, text=True)
             self.last_time = float(p.stdout)
             return np.fromfile(dst, np.uint8).reshape(rows, cols).astype(bool)
@@ -175,7 +209,8 @@ class Gdal(Adapter):
         ds = _mem_dataset(job.dem, job.gt)
         out = gdal.ViewshedGenerate(
             ds.GetRasterBand(1), "MEM", "", [], job.observer[0], job.observer[1],
-            job.observer_height, job.target_height, 1, 0, 0, 0, 0.0,
+            job.observer_height, job.target_height, 1, 0, 0, 0,
+            (1.0 - job.refraction) if job.curvature else 0.0,
             getattr(gdal, "GVM_" + self.mode), job.max_distance or 0.0)
         return out.GetRasterBand(1).ReadAsArray() == 1
 
@@ -202,13 +237,16 @@ class Grass(Adapter):
                 tif = d / f"dem{i}.tif"
                 gdal.Translate(str(tif), _mem_dataset(j.dem, j.gt), format="GTiff")
                 md = j.max_distance if j.max_distance is not None else -1
+                flags = "-b" + ("cr" if j.curvature else "")
+                refr = f" refraction_coeff={j.refraction!r}" if j.curvature else ""
                 lines += [
                     f"r.in.gdal -o input={tif} output=dem{i} --quiet --overwrite",
                     f"g.region raster=dem{i} --quiet",
                     f"s=$(date +%s.%N)",
-                    f"r.viewshed -b input=dem{i} output=vs{i} coordinates={j.observer[0]!r},"
+                    f"r.viewshed {flags} input=dem{i} output=vs{i} coordinates={j.observer[0]!r},"
                     f"{j.observer[1]!r} observer_elevation={j.observer_height!r} "
-                    f"target_elevation={j.target_height!r} max_distance={md} --quiet --overwrite",
+                    f"target_elevation={j.target_height!r} max_distance={md}{refr} "
+                    "--quiet --overwrite",
                     f"e=$(date +%s.%N); echo \"$s $e\" > {d}/t{i}",
                     f"r.out.gdal input=vs{i} output={d}/vs{i}.tif format=GTiff --quiet",
                 ]
@@ -259,6 +297,6 @@ class PhotoFootprint(Adapter):
 
 
 def all_adapters():
-    return [Oracle(), OracleRviewshed(), ReferencePy(), Rust("rviewshed"), Rust("bilinear"),
+    return [Oracle(), OracleRviewshed(), PythonBindings(), ReferencePy(), Rust("rviewshed"), Rust("bilinear"),
             *[Gdal(m) for m in ("Edge", "Diagonal", "Min", "Max")],
             Grass(), PhotoFootprint()]

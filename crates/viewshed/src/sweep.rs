@@ -337,8 +337,9 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     let (c0, c1) = reach.map_or((0, cols - 1), |k| ((cv - k).max(0), (cv + k).min(cols - 1)));
 
     let max_d = opts.max_distance;
+    let drop = opts.drop_factor();
     let make = |r: i64, c: i64| -> Cell {
-        let cell = cell_at(grid, rv, cv, eye, r, c);
+        let cell = cell_at(grid, rv, cv, eye, drop, r, c);
         if cell.ring != u32::MAX && max_d.map_or(false, |m| (cell.key() as f64).sqrt() * res > m) {
             return Cell::NONE;
         }
@@ -415,7 +416,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                         dir: cell.dir(1),
                         key,
                         ring: cell.ring as usize,
-                        slope: (grid.z[idx] + th - eye) / dist,
+                        slope: (grid.z[idx] - dist * dist * drop + th - eye) / dist,
                         theta: None,
                         grad: 0.0,
                     };
@@ -429,8 +430,10 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
 }
 
 /// Cell (r, c) as seen from the eye at height `eye` over the centre of cell
-/// (rv, cv): its three slopes. `Cell::NONE` for the observer's own cell and no-data.
-pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, r: i64, c: i64) -> Cell {
+/// (rv, cv): its three slopes. Every sample is lowered by `d * d * drop` for
+/// earth curvature at its own distance d (corner heights are averaged first).
+/// `Cell::NONE` for the observer's own cell and no-data.
+pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, drop: f64, r: i64, c: i64) -> Cell {
     let (rows, cols) = (grid.rows as i64, grid.cols as i64);
     let z = |r: i64, c: i64| grid.at(r as usize, c as usize);
     let res = grid.res();
@@ -451,7 +454,7 @@ pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, r: i64, c: i64) -
     }
     let [enter, exit] = corners(dr, dc);
     let mut cell = Cell { slope: [0.0; 3], dr: dr as i32, dc: dc as i32, ring: ring as u32 };
-    cell.slope[1] = (zc - eye) / dist;
+    cell.slope[1] = (zc - dist * dist * drop - eye) / dist;
     for (j, (oc, or)) in [(0usize, enter), (2, exit)] {
         let (pc, pr) = (2 * dc + oc, 2 * dr + or);
         let (rr, cc) = (r + or.signum(), c + oc.signum());
@@ -466,7 +469,7 @@ pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, r: i64, c: i64) -
             }
         };
         let d = ((pc * pc + pr * pr) as f64 / 4.0).sqrt() * res;
-        cell.slope[j] = (h - eye) / d;
+        cell.slope[j] = (h - d * d * drop - eye) / d;
     }
     cell
 }

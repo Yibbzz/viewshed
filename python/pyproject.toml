@@ -1,23 +1,30 @@
 [build-system]
-requires = ["setuptools>=64"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
 
 [project]
 name = "viewshed"
 version = "0.0.1"
-description = "Fast, exact line-of-sight viewsheds. 0.0.x is the reference implementation."
+description = "Fast, exact line-of-sight viewsheds."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 dependencies = ["numpy>=1.21"]
-keywords = ["viewshed", "gis", "visibility", "line-of-sight", "terrain", "lidar"]
+keywords = ["viewshed", "gis", "visibility", "line-of-sight", "terrain", "lidar", "ztv"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: GIS",
 ]
 
-[tool.setuptools]
-packages = ["viewshed"]
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.maturin]
+manifest-path = "../crates/viewshed-py/Cargo.toml"
+module-name = "viewshed._viewshed"
+python-source = "."
+features = ["pyo3/extension-module"]

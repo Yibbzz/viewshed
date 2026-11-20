@@ -21,7 +21,7 @@ from fractions import Fraction
 
 import numpy as np
 
-VERSION = "bilinear-1"
+VERSION = "bilinear-2"   # 2: earth curvature and refraction
 
 
 def _corners(z, r0, c0):
@@ -44,8 +44,11 @@ def _crossings(p0, d):
     return [(k - p0) / d for k in range(math.floor(lo) + 1, math.ceil(hi))]
 
 
-def _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last_th=None):
-    """Smallest gap on [ta, tb] (None if the patch has no data). Generic over float/Fraction."""
+def _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last_th=None, bend=0):
+    """Smallest gap on [ta, tb] (None if the patch has no data). Generic over float/Fraction.
+
+    `bend` is the earth-curvature term: the surface at parameter t is lowered by
+    bend * t^2 (= drop factor * horizontal distance^2), which keeps the gap quadratic."""
     mid = (ta + tb) / 2
     c0, r0 = math.floor(ue + mid * du), math.floor(ve + mid * dv)
     cs = _corners(z, r0, c0)
@@ -53,33 +56,36 @@ def _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last_th=None):
         return None
 
     def gap(t):
-        return ze + t * dz - _bilinear(cs, ue + t * du - c0, ve + t * dv - r0)
+        return ze + t * dz - _bilinear(cs, ue + t * du - c0, ve + t * dv - r0) + bend * t * t
 
     # On the last segment the end value is target_height >= 0 exactly; a dip below 0
     # before it must show up at ta or at the vertex, so the end is left out.
     vals = [gap(ta)] if last_th is not None else [gap(ta), gap(tb)]
     z00, z01, z10, z11 = cs
     e3 = z00 - z01 - z10 + z11
-    g2 = -e3 * du * dv
+    g2 = -e3 * du * dv + bend
     if g2 > 0:
         tca, trb = ue + ta * du - c0, ve + ta * dv - r0
-        g1 = dz - ((z01 - z00) * du + (z10 - z00) * dv + e3 * (tca * dv + trb * du))
+        g1 = dz - ((z01 - z00) * du + (z10 - z00) * dv + e3 * (tca * dv + trb * du)) + 2 * bend * ta
         s = -g1 / (2 * g2)
         if 0 < s < tb - ta:
             vals.append(gap(ta + s))
     return min(vals)
 
 
-def _blocked_exact(z, transform, x, y, ground, oh, r, c, th):
+def _blocked_exact(z, transform, x, y, ground, oh, r, c, th, drop=0.0):
     F = Fraction
     ue = (F(x) - F(transform[0])) / F(transform[1]) - F(1, 2)
     ve = (F(y) - F(transform[3])) / F(transform[5]) - F(1, 2)
     zf = np.vectorize(lambda v: v if math.isnan(v) else F(v), otypes=[object])(z)
     ze = ground + F(oh)
-    du, dv, dz = F(c) - ue, F(r) - ve, F(z[r, c]) + F(th) - ze
+    du, dv = F(c) - ue, F(r) - ve
+    res = abs(F(transform[1]))
+    bend = F(drop) * (du * du + dv * dv) * res * res
+    dz = F(z[r, c]) - bend + F(th) - ze
     ts = sorted({F(0), F(1), *_crossings(ue, du), *_crossings(ve, dv)})
     for ta, tb in zip(ts, ts[1:]):
-        m = _segment_min(zf, ue, ve, ze, du, dv, dz, ta, tb)
+        m = _segment_min(zf, ue, ve, ze, du, dv, dz, ta, tb, bend=bend)
         if m is not None and m < 0:
             return True
     return False
@@ -96,9 +102,17 @@ def _ground_exact(z, transform, x, y):
     return _bilinear(tuple(F(q) for q in cs), u - c0, v - r0)
 
 
+def drop_factor(curvature, refraction, earth_radius):
+    """The curvature drop at horizontal distance d is d * d * drop_factor (as in the crate)."""
+    return (1.0 - refraction) / (2.0 * earth_radius) if curvature else 0.0
+
+
 def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
-             max_distance=None):
-    """Exact visibility and clearance for every cell. Returns (visible, clearance, n_exact)."""
+             max_distance=None, curvature=False, refraction=0.13, earth_radius=6371008.8):
+    """Exact visibility and clearance for every cell. Returns (visible, clearance, n_exact).
+
+    With `curvature`, every surface point and the target are lowered by
+    d^2 / (2 R) * (1 - refraction) at horizontal distance d from the observer."""
     z = np.asarray(z, dtype=float)
     if transform[2] != 0 or transform[4] != 0 or abs(abs(transform[1]) - abs(transform[5])) > 0:
         raise ValueError("needs a north-up raster with square cells")
@@ -114,6 +128,7 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
     if ground is None:
         raise ValueError("there is no height data under the observer")
     ze = float(ground) + observer_height
+    drop = drop_factor(curvature, refraction, earth_radius)
     tol = 1e-9 * (1.0 + np.nanmax(np.abs(z)) + abs(ze))
     res = abs(transform[1])
     visible = np.zeros(z.shape, dtype=bool)
@@ -127,18 +142,20 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
             L = math.hypot(du, dv)
             if max_distance is not None and L * res > max_distance:
                 continue
-            dz = z[r, c] + target_height - ze
+            bend = drop * (du * du + dv * dv) * res * res
+            dz = z[r, c] - bend + target_height - ze
             ts = sorted({0.0, 1.0, *_crossings(ue, du), *_crossings(ve, dv)})
             t_far = 1 - 0.5 / L if L > 0.5 else 0.0
             mn, far = math.inf, math.inf
             for i, (ta, tb) in enumerate(zip(ts, ts[1:])):
                 last = target_height if i == len(ts) - 2 else None
-                m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last)
+                m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last, bend)
                 if m is None:
                     continue
                 mn = min(mn, m)
                 if ta < t_far:
-                    mf = m if tb <= t_far else _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far)
+                    mf = m if tb <= t_far else _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far,
+                                                            bend=bend)
                     far = min(far, mf)
             if mn < -tol:
                 blocked = True
@@ -147,7 +164,7 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
             else:
                 n_exact += 1
                 blocked = _blocked_exact(z, transform, x, y, ground, observer_height,
-                                         r, c, target_height)
+                                         r, c, target_height, drop)
             visible[r, c] = not blocked
             clearance[r, c] = far
     return visible, clearance, n_exact

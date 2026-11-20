@@ -3,14 +3,20 @@
 Compares viewshed tools against exact baselines (see "Conformance suite" in
 [`../BRIEF.md`](../BRIEF.md)). Not published; it's the yardstick for the library.
 
+Run it with the Python environment that has the package built in it, so the
+bindings are checked too:
+
 ```bash
-cd conformance
-python -m pytest tests                 # the suite's own tests
-python -m conformance.run --quick      # ~1 min
-python -m conformance.run --out report.md
-python -m conformance.bench --grass    # single-observer speed, 1,000-cell radius
-python -m conformance.ztv_bench        # wind-farm ZTV, every cell an observer
-python -m conformance.ztv_bench --cells 401 --relief 3 --truth   # vs true visibility
+cd python && uv venv --system-site-packages .venv && uv pip install --python .venv/bin/python maturin pytest "numpy<2"
+.venv/bin/maturin develop --release && cd ../conformance
+PY=../python/.venv/bin/python
+$PY -m pytest tests                    # the suite's own tests
+$PY -m conformance.run --quick         # ~1 min
+$PY -m conformance.run --out report.md
+$PY -m conformance.bench --grass       # single-observer speed, 1,000-cell radius
+$PY -m conformance.ztv_bench           # wind-farm ZTV, every cell an observer
+$PY -m conformance.ztv_bench --cells 401 --relief 3 --truth      # vs true visibility
+$PY -m conformance.ztv_bench --cells 401 --res 50 --relief 3 --curvature --truth
 ```
 
 ## Wind-farm ZTV (`ztv_bench.py`)
@@ -50,6 +56,17 @@ are skipped: the Rust crate (`viewshed-rs-sweep`, the default r.viewshed-model
 sweep, and `viewshed-rs-bilinear`), the Python 0.0.1 reference, GDAL in all four
 modes (curvature off), GRASS `r.viewshed` (one session per run; start-up reported
 separately) and the PhotoFootprint sweep (`PHOTOFOOTPRINT=/path/to/repo`).
+
+## Earth curvature and refraction
+
+Both oracles take `curvature`, `refraction` and `earth_radius`. In the bilinear
+oracle the d²/(2R) drop keeps each patch's gap quadratic, so it stays exact.
+`tests/test_curvature.py` checks the bilinear oracle against the analytic horizon
+on flat ground, the r.viewshed oracle against GRASS `r.viewshed -c -r` on every
+cell (GRASS uses its location's ellipsoid semi-major axis; with that radius the
+match is exact over thousands of curvature-decided cells), and the Rust sweep
+against the oracle on random rasters with tiny earth radii (so curvature decides
+many cells). The d²/(2R) drop is within 1 mm of a true sphere out to 35 km.
 
 ## Not done yet
 

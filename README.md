@@ -6,13 +6,16 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-**Rust:** the default is a fast radial sweep over GRASS `r.viewshed`'s surface model, using all cores. It matches GRASS cell for cell. A 1,000-cell radius (4 million cells) takes about 1.0 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`. The slow bilinear reference from 0.0.1 is still available as `Surface::Bilinear`.
+Pre-release (0.0.x, not yet on PyPI or crates.io in this form). See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every result is checked.
 
-**Python:** still the pure-NumPy bilinear reference from 0.0.1. The Rust core will be exposed to Python through PyO3 bindings next, with the same API. See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every tool is checked.
+- **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form with rational tie-breaks), and an r.viewshed-model oracle written from the method's description. Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
+- **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
+- **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 20× faster and within a few hundredths of a percent of the definition).
+- **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
 | Package | Install | Code |
 | --- | --- | --- |
-| Python | `pip install viewshed` | [`python/`](python/) (NumPy) |
+| Python | `pip install viewshed` (abi3 wheels for Python ≥ 3.9) | [`python/`](python/) |
 | Rust | `cargo add viewshed` | [`crates/viewshed/`](crates/viewshed/) |
 
 ## Python
@@ -23,12 +26,18 @@ import viewshed
 
 dem = np.zeros((41, 41)); dem[15, :] = 5.0          # flat ground with a 5 m wall
 gt = (0.0, 1.0, 0.0, 41.0, 0.0, -1.0)               # GDAL-style geotransform
-seen = viewshed.viewshed(dem, gt, observer=(20.5, 20.5), observer_height=1.6)
+seen = viewshed.viewshed(dem, gt, observer=(20.5, 20.5), observer_height=1.6)   # bool array
+
+# zone of theoretical visibility: how many blade tips each cell can see from 2 m
+tips = [(10.5, 30.5, 150.0), (30.5, 30.5, 150.0)]
+counts = viewshed.ztv(dem, gt, tips, observer_height=2.0)                      # uint32 array
 ```
+
+Options: `observer_height`, `target_height`, `max_distance`, `curvature` (default on), `refraction` (0.13), `earth_radius` (mean earth radius), `surface` (`"rviewshed"` or the slow `"bilinear"` reference). The computation runs in Rust with the GIL released. `viewshed.reference` is the original pure-NumPy implementation, kept as an independent check.
 
 ## Surface model
 
-The default is the model GRASS `r.viewshed` uses, so its results can be checked against GRASS. The observer stands at the centre of its cell. Every cell closer than the target is reduced to three height samples: its centre, and the two corners that bound it as seen from the observer, with each corner averaged from the four cells meeting there. A target (its cell centre plus `target_height`) is hidden when a closer cell's gradient, interpolated by angle at the target's direction, is steeper. No-data (NaN) never blocks and is never visible.
+The default is the model GRASS `r.viewshed` uses, so its results can be checked against GRASS. The observer stands at the centre of its cell. Every cell closer than the target is reduced to three height samples: its centre, and the two corners that bound it as seen from the observer, with each corner averaged from the four cells meeting there. A target (its cell centre plus `target_height`) is hidden when a closer cell's gradient, interpolated by angle at the target's direction, is steeper. With curvature on, every point is lowered by d²/(2R)·(1 − refraction) at horizontal distance d. No-data (NaN) never blocks and is never visible.
 
 ## Licence
 

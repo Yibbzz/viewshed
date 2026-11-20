@@ -115,7 +115,7 @@ def main(argv=None):
     lines += ["", "## 2. Analytic scenes: error vs cell size", "",
               "True visibility from closed-form geometry, centre rule. Cell = % of cells wrong "
               "(wrongly hidden / wrongly visible). A sound method's error shrinks as cells get finer.", ""]
-    skip_slow = {"oracle-bilinear": 1.0, "oracle-rviewshed": 1.0, "viewshed-py-0.0.1": 1.0}   # smallest res they run at
+    skip_slow = {"oracle-bilinear": 1.0, "oracle-rviewshed": 1.0, "viewshed-py-reference": 1.0}   # smallest res they run at
     for sc in scenes.SCENES:
         for th in ((0.0,) if a.quick else scenes.SCENE_TARGET_HEIGHTS):
             sc.target_height = th

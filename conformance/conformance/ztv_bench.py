@@ -45,10 +45,13 @@ def landscape(n, res, seed=3, rough=True):
     return z + 6 * noise / noise.std()
 
 
-def true_ztv(n, res, targets, eye, max_d, step=5.0):
+def true_ztv(n, res, targets, eye, max_d, step=5.0, drop=0.0):
     """Count of tips visible from every cell centre on the continuous surface,
     sampling each sightline at most every `step` m. Map y here is north-up
-    like the raster: row r has centre y = (n - r - 0.5) * res."""
+    like the raster: row r has centre y = (n - r - 0.5) * res. With `drop`,
+    every point is lowered by drop * d^2 at horizontal distance d from the
+    observer (the same correction the crate uses; it is symmetric, so seen
+    from the turbine the answer is the same)."""
     c = (np.arange(n) + 0.5) * res
     gx, gy = np.meshgrid(c, (n - np.arange(n) - 0.5) * res)
     mid = n * res / 2
@@ -58,8 +61,8 @@ def true_ztv(n, res, targets, eye, max_d, step=5.0):
     for tx, ty, h in targets:
         ox, oy = gx.ravel(), gy.ravel()
         z0 = surf(ox, oy) + eye
-        z1 = surf(np.array(tx), np.array(ty)) + h
         dist = np.hypot(tx - ox, ty - oy)
+        z1 = surf(np.array(tx), np.array(ty)) + h - drop * dist * dist
         ok = np.ones(ox.shape, bool) if max_d is None else dist <= max_d
         steps = int(np.ceil(dist.max() / step))
         for k in range(1, steps):
@@ -69,10 +72,14 @@ def true_ztv(n, res, targets, eye, max_d, step=5.0):
                 break
             px = ox[idx] + t * (tx - ox[idx])
             py = oy[idx] + t * (ty - oy[idx])
-            line = z0[idx] + t * (z1 - z0[idx])
-            ok[idx[surf(px, py) > line]] = False
+            line = z0[idx] + t * (z1[idx] - z0[idx])
+            ground = surf(px, py) - drop * (t * dist[idx]) ** 2
+            ok[idx[ground > line]] = False
         counts += ok.reshape(n, n)
     return counts
+
+
+CURVE = ["0", "0.0", "6371008.8"]   # curvature 0|1, refraction, radius; set by --curvature
 
 
 def run(dem, gt, eye, method, targets, max_d):
@@ -83,7 +90,8 @@ def run(dem, gt, eye, method, targets, max_d):
         spec = ";".join(f"{x!r},{y!r},{h!r}" for x, y, h in targets)
         p = subprocess.run([str(BIN), str(src), str(rows), str(cols), repr(gt[0]), repr(gt[1]),
                             repr(gt[3]), repr(eye), repr(-1.0 if max_d is None else max_d),
-                            method, spec, str(dst)], check=True, capture_output=True, text=True)
+                            method, spec, str(dst), *CURVE],
+                           check=True, capture_output=True, text=True)
         return np.fromfile(dst, "<u4").reshape(rows, cols), float(p.stdout)
 
 
@@ -97,11 +105,17 @@ def main(argv=None):
     ap.add_argument("--max-distance", type=float, default=None)
     ap.add_argument("--skip-forward", action="store_true")
     ap.add_argument("--relief", type=float, default=1.0, help="scale the hills by this")
+    ap.add_argument("--curvature", action="store_true",
+                    help="earth curvature with refraction 0.13 (mean earth radius)")
     ap.add_argument("--truth", action="store_true",
                     help="smooth landscape, compare both methods with true visibility on it")
     a = ap.parse_args(argv)
     global RELIEF
     RELIEF = a.relief
+    drop = 0.0
+    if a.curvature:
+        CURVE[:] = ["1", "0.13", "6371008.8"]
+        drop = (1 - 0.13) / (2 * 6371008.8)
     Rust("rviewshed").available()          # builds the examples
     n, res = a.cells, a.res
     dem = landscape(n, res, rough=not a.truth)
@@ -112,7 +126,8 @@ def main(argv=None):
     targets = [(np.floor(x / res) * res + res / 2, np.floor(y / res) * res + res / 2, h)
                for x, y, h in targets]           # tips at cell centres, as the model places them
     print(f"{n} x {n} cells at {res:g} m ({n * res / 1000:g} km square), {a.turbines} turbines, "
-          f"tip {a.tip:g} m, eye {a.eye:g} m, every cell an observer")
+          f"tip {a.tip:g} m, eye {a.eye:g} m, every cell an observer"
+          + (", earth curvature and refraction" if a.curvature else ""))
     rec, t_rec = run(dem, gt, a.eye, "reciprocal", targets, a.max_distance)
     print(f"reciprocal (one viewshed per turbine): {t_rec:7.2f} s")
     if a.skip_forward:
@@ -131,7 +146,7 @@ def main(argv=None):
     if a.truth:
         import time
         t0 = time.perf_counter()
-        truth = true_ztv(n, res, targets, a.eye, a.max_distance)
+        truth = true_ztv(n, res, targets, a.eye, a.max_distance, drop=drop)
         print(f"true ZTV on the continuous surface ({time.perf_counter() - t0:.0f} s in NumPy): "
               f"{np.mean(truth > 0):.1%} of cells see a turbine")
         for name, got in (("forward", fwd), ("reciprocal", rec)):

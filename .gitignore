@@ -6,3 +6,5 @@ __pycache__/
 .cache/
 report.md
 conformance-report.md
+.venv/
+python/viewshed/*.so

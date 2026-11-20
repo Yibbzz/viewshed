@@ -1,0 +1,72 @@
+name: wheels
+
+# abi3 wheels (one per platform, for every Python >= 3.9) and an sdist.
+# Runs on version tags and by hand; publishing to PyPI is a separate, manual step.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  wheels:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { os: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { os: macos-13, target: x86_64 }
+          - { os: macos-14, target: aarch64 }
+          - { os: windows-latest, target: x64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'off' }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: python/dist/*.whl
+
+  check:
+    # Install each native wheel on the oldest and newest supported Python, with no
+    # compiler or Rust, and run the package tests against it.
+    needs: wheels
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          merge-multiple: true
+      - name: Install the wheel and test
+        shell: bash
+        run: |
+          python -m pip install --no-index --find-links wheels viewshed
+          python -m pip install pytest
+          cd python/tests && python -m pytest -q --import-mode=importlib .
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: python/dist/*.tar.gz
