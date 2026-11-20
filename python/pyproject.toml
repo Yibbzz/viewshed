@@ -20,6 +20,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: GIS",
 ]
 
+[project.urls]
+Repository = "https://github.com/Yibbzz/viewshed"
+Issues = "https://github.com/Yibbzz/viewshed/issues"
+
 [project.optional-dependencies]
 test = ["pytest"]
 

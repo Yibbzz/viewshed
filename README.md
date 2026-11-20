@@ -39,6 +39,10 @@ Options: `observer_height`, `target_height`, `max_distance`, `curvature` (defaul
 
 The default is the model GRASS `r.viewshed` uses, so its results can be checked against GRASS. The observer stands at the centre of its cell. Every cell closer than the target is reduced to three height samples: its centre, and the two corners that bound it as seen from the observer, with each corner averaged from the four cells meeting there. A target (its cell centre plus `target_height`) is hidden when a closer cell's gradient, interpolated by angle at the target's direction, is steeper. With curvature on, every point is lowered by d²/(2R)·(1 − refraction) at horizontal distance d. No-data (NaN) never blocks and is never visible.
 
+## Releasing
+
+The version is written in four places (`crates/viewshed/Cargo.toml`, `crates/viewshed-py/Cargo.toml`, `python/pyproject.toml`, `python/viewshed/__init__.py`); `python scripts/check_versions.py` checks they agree. Pushing a tag `vX.Y.Z` that matches runs the `wheels` workflow: it builds abi3 wheels for Linux (x86_64, aarch64), macOS (Intel, Apple) and Windows, installs and tests each one on Python 3.9 and 3.13, then publishes to PyPI (trusted publishing, `pypi` environment) and crates.io (`CARGO_REGISTRY_TOKEN` in the `crates-io` environment). Nothing is published if the versions and tag disagree or any test fails.
+
 ## Licence
 
 MIT OR Apache-2.0, at your option.
