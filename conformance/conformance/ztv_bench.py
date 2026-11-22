@@ -15,7 +15,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .adapters import EXE, REPO, Rust
+from . import exact
+from .adapters import EXE, REPO, num, Rust
 
 BIN = REPO / f"target/release/examples/raw_ztv{EXE}"
 
@@ -35,14 +36,14 @@ def landscape(n, res, seed=3, rough=True):
     rng = np.random.default_rng(seed)
     c = (np.arange(n) + 0.5) * res
     x, y = np.meshgrid(c, c)
-    z = smooth_surface(x, y, x.mean())
+    z = smooth_surface(x, y, exact.mean(x))
     if not rough:
         return z
     noise = rng.normal(0, 1, (n, n))
     for _ in range(8):
         noise = (noise + np.roll(noise, 1, 0) + np.roll(noise, -1, 0)
                  + np.roll(noise, 1, 1) + np.roll(noise, -1, 1)) / 5
-    return z + 6 * noise / noise.std()
+    return z + 6 * noise / exact.std(noise)
 
 
 def true_ztv(n, res, targets, eye, max_d, step=5.0, drop=0.0):
@@ -87,9 +88,9 @@ def run(dem, gt, eye, method, targets, max_d):
         src, dst = Path(d, "z.f64"), Path(d, "o.u32")
         np.ascontiguousarray(dem, "<f8").tofile(src)
         rows, cols = dem.shape
-        spec = ";".join(f"{x!r},{y!r},{h!r}" for x, y, h in targets)
-        p = subprocess.run([str(BIN), str(src), str(rows), str(cols), repr(gt[0]), repr(gt[1]),
-                            repr(gt[3]), repr(eye), repr(-1.0 if max_d is None else max_d),
+        spec = ";".join(f"{num(x)},{num(y)},{num(h)}" for x, y, h in targets)
+        p = subprocess.run([str(BIN), str(src), str(rows), str(cols), num(gt[0]), num(gt[1]),
+                            num(gt[3]), num(eye), num(-1.0 if max_d is None else max_d),
                             method, spec, str(dst), *CURVE],
                            check=True, capture_output=True, text=True)
         return np.fromfile(dst, "<u4").reshape(rows, cols), float(p.stdout)

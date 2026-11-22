@@ -5,6 +5,8 @@ All are 1 m cells with the observer at the centre of the middle cell.
 
 import numpy as np
 
+from . import exact
+
 N = 61
 GT = (0.0, 1.0, 0.0, float(N), 0.0, -1.0)
 OBSERVER = (N / 2, N / 2)
@@ -20,7 +22,7 @@ def _smooth_noise(seed, passes, amp):
     z = rng.normal(0, 1, (N, N))
     for _ in range(passes):
         z = (z + np.roll(z, 1, 0) + np.roll(z, -1, 0) + np.roll(z, 1, 1) + np.roll(z, -1, 1)) / 5
-    return amp * z / z.std()
+    return amp * z / exact.std(z)
 
 
 def flat_wall():

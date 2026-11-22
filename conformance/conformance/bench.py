@@ -10,6 +10,7 @@ import time
 
 import numpy as np
 
+from . import exact
 from .adapters import Gdal, Grass, Job, Rust
 
 
@@ -20,7 +21,7 @@ def surface(n, seed=0):
         z = (z + np.roll(z, 1, 0) + np.roll(z, -1, 0) + np.roll(z, 1, 1) + np.roll(z, -1, 1)) / 5
     c = np.arange(n) + 0.5
     x, y = np.meshgrid(c, c)
-    return z / z.std() * 3 + 20 * np.sin(x / 150) * np.cos(y / 200)
+    return z / exact.std(z) * 3 + 20 * np.sin(x / 150) * np.cos(y / 200)
 
 
 def main(argv=None):

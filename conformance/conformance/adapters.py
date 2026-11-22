@@ -19,6 +19,13 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 EXE = ".exe" if os.name == "nt" else ""
+
+
+def num(x):
+    """A number as a command-line argument for the Rust examples: repr(float(x)) is
+    an exact round-trip, and plain digits even for numpy scalars (numpy 2 reprs
+    them as "np.float64(9.5)")."""
+    return repr(float(x))
 # With CONFORMANCE_STRICT=1 (set in CI), the crate and the Python bindings must be
 # available: their tests fail instead of being skipped, so a broken build can't
 # make the suite pass by checking nothing.
@@ -172,9 +179,6 @@ class Rust(Adapter):
             np.ascontiguousarray(j.dem, "<f8").tofile(src)
             rows, cols = j.dem.shape
             md = -1.0 if j.max_distance is None else j.max_distance
-            # repr(float(x)): exact round-trip, and plain digits even for numpy
-            # scalars (numpy 2 reprs them as "np.float64(9.5)").
-            num = lambda x: repr(float(x))
             p = subprocess.run([str(self._bin), str(src), str(rows), str(cols), num(j.gt[0]),
                                 num(j.gt[1]), num(j.gt[3]), num(j.observer[0]),
                                 num(j.observer[1]), num(j.observer_height), str(dst),
@@ -256,14 +260,14 @@ class Grass(Adapter):
                 gdal.Translate(str(tif), _mem_dataset(j.dem, j.gt), format="GTiff")
                 md = j.max_distance if j.max_distance is not None else -1
                 flags = "-b" + ("cr" if j.curvature else "")
-                refr = f" refraction_coeff={j.refraction!r}" if j.curvature else ""
+                refr = f" refraction_coeff={num(j.refraction)}" if j.curvature else ""
                 lines += [
                     f"r.in.gdal -o input={tif} output=dem{i} --quiet --overwrite",
                     f"g.region raster=dem{i} --quiet",
                     f"s=$(date +%s.%N)",
-                    f"r.viewshed {flags} input=dem{i} output=vs{i} coordinates={j.observer[0]!r},"
-                    f"{j.observer[1]!r} observer_elevation={j.observer_height!r} "
-                    f"target_elevation={j.target_height!r} max_distance={md}{refr} "
+                    f"r.viewshed {flags} input=dem{i} output=vs{i} coordinates={num(j.observer[0])},"
+                    f"{num(j.observer[1])} observer_elevation={num(j.observer_height)} "
+                    f"target_elevation={num(j.target_height)} max_distance={md}{refr} "
                     "--quiet --overwrite",
                     f"e=$(date +%s.%N); echo \"$s $e\" > {d}/t{i}",
                     f"r.out.gdal input=vs{i} output={d}/vs{i}.tif format=GTiff --quiet",

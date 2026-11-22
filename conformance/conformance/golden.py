@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import ztv_bench
-from .adapters import EXE, REPO, Job, Rust
+from .adapters import EXE, REPO, num, Job, Rust
 from .bench import surface
 
 GOLDEN = Path(__file__).resolve().parents[1] / "golden.json"
@@ -51,9 +51,9 @@ def _ztv(dem, gt, targets, eye, method, curvature):
     with tempfile.TemporaryDirectory() as d:
         src, dst = Path(d, "z.f64"), Path(d, "o.u32")
         np.ascontiguousarray(dem, "<f8").tofile(src)
-        spec = ";".join(f"{x!r},{y!r},{h!r}" for x, y, h in targets)
+        spec = ";".join(f"{num(x)},{num(y)},{num(h)}" for x, y, h in targets)
         args = [str(REPO / f"target/release/examples/raw_ztv{EXE}"), str(src), *map(str, dem.shape),
-                repr(gt[0]), repr(gt[1]), repr(gt[3]), repr(eye), "-1", method, spec, str(dst)]
+                num(gt[0]), num(gt[1]), num(gt[3]), num(eye), "-1", method, spec, str(dst)]
         if curvature:
             args += ["1", "0.13", "6371008.8"]
         subprocess.run(args, check=True, capture_output=True)

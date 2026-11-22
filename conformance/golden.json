@@ -1,14 +1,14 @@
 {
   "viewshed r1000 flat": {
-    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
     "output": "a13180e8697d517ad3930fa633c7aea8c8b822f2932da3e4a4ca48e4fe53aeaf"
   },
   "viewshed r1000 target 1.5 curved": {
-    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
     "output": "cd675836cbf45532bcd8e974b722fb89ad6a148c03761ecc5be659bbd86c5c70"
   },
   "viewshed full raster curved": {
-    "input": "aa729b0edfddd409bebd898bc2eeb8b021fe5e5580b17366c543447661785817",
+    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
     "output": "628e93d1f161d95afbda312b167d07473581beb5b16b5fff6cde9740bba7f4d0"
   },
   "ztv forward flat10": {
