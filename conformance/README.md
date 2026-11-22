@@ -69,6 +69,16 @@ smooth mathematical surface, and both are compared with true visibility on it
     is undecided on, plus neighbours (`oracle_fast.blocked_exact_patches`): every
     other segment is certified clear, so this decides what checking the whole
     sightline would. Tie-heavy 301 x 301 rasters: minutes, not hours.
+- **`oracle_r3.py` and `oracle_r3_numba.py`, the gridlines model (Franklin &
+  Ray's R3).** The literature's usual "exact" viewshed checks the terrain only where
+  the sightline crosses a grid line, interpolating linearly along it: the bilinear
+  surface sampled at those crossings, with the terrain between them treated as a
+  polyline. The bilinear model also checks each cell's interior, so every cell it
+  shows is shown here too (`tests/test_oracle_r3.py` checks that). `oracle_r3` is
+  exact rational arithmetic throughout; `oracle_r3_numba` certifies each crossing
+  with `certify.py`'s bounds and settles the rest one crossing at a time, and
+  matches it on every cell. Same eye, target, curvature, no-data and distance
+  rules as `oracle.py`, so the two differ only in the model.
 - **`oracle_rviewshed.py`, the r.viewshed model.** What GRASS `r.viewshed`
   actually computes, written from a description of the method (not GRASS's GPL
   code): each closer cell is reduced to three gradient samples (the two corners
