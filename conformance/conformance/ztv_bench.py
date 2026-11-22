@@ -27,9 +27,10 @@ RELIEF = 1.0   # scales the hills (not the ridge); set by --relief
 def smooth_surface(x, y, mid):
     """The landscape without its roughness: a continuous function, so true
     visibility can be computed on it directly."""
-    hills = 60 * np.sin(x / 1300) * np.cos(y / 1700) + 35 * np.sin((x + 2 * y) / 900)
-    hills += 25 * np.sin(x / 310) * np.sin(y / 270)                 # smaller hills and valleys
-    return RELIEF * hills + 90 * np.exp(-((x - mid) / 900) ** 2) + 100   # a ridge for the farm
+    w = exact.wave        # bit-identical on every platform, unlike np.sin (see exact.py)
+    hills = 60 * w(x / 1300) * exact.cowave(y / 1700) + 35 * w((x + 2 * y) / 900)
+    hills += 25 * w(x / 310) * w(y / 270)                           # smaller hills and valleys
+    return RELIEF * hills + 90 * exact.bump((x - mid) / 900) + 100  # a ridge for the farm
 
 
 def landscape(n, res, seed=3, rough=True):
@@ -39,7 +40,7 @@ def landscape(n, res, seed=3, rough=True):
     z = smooth_surface(x, y, exact.mean(x))
     if not rough:
         return z
-    noise = rng.normal(0, 1, (n, n))
+    noise = exact.noise(rng, (n, n))
     for _ in range(8):
         noise = (noise + np.roll(noise, 1, 0) + np.roll(noise, -1, 0)
                  + np.roll(noise, 1, 1) + np.roll(noise, -1, 1)) / 5

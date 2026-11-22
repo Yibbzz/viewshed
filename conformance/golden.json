@@ -1,38 +1,38 @@
 {
   "viewshed r1000 flat": {
-    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
-    "output": "a13180e8697d517ad3930fa633c7aea8c8b822f2932da3e4a4ca48e4fe53aeaf"
+    "input": "b100392db793404dd97ec146ff320b084cefc6b0e6249c0d85216394481e2405",
+    "output": "2f7479d9056bec74a981fbea58abd037ad8e2a54e259fa5b93ce4719606018c8"
   },
   "viewshed r1000 target 1.5 curved": {
-    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
-    "output": "cd675836cbf45532bcd8e974b722fb89ad6a148c03761ecc5be659bbd86c5c70"
+    "input": "b100392db793404dd97ec146ff320b084cefc6b0e6249c0d85216394481e2405",
+    "output": "77492031bd6215f44e39b2777c8037ba7f1f91154549cf1cdbdcd5a7a1d0406e"
   },
   "viewshed full raster curved": {
-    "input": "627bc9437dfd53206e967e6c57ee1fc9cdc2f5898cf3bec67a21de2fc49ede57",
-    "output": "628e93d1f161d95afbda312b167d07473581beb5b16b5fff6cde9740bba7f4d0"
+    "input": "b100392db793404dd97ec146ff320b084cefc6b0e6249c0d85216394481e2405",
+    "output": "a96799dd9aa7f959c3ee53eb2565fc4f294e3713b48ffc7ab474a9c788100806"
   },
   "ztv forward flat10": {
-    "input": "0b253a248085d369ac6f0bdf85374fac176debb11284ce6d96adf3498f6d8a7e",
-    "output": "955b3726e105add5f2ea7208927136215b9e4eb1afa4e175488a381823bedea3"
+    "input": "27121b1cfb66961173edf36cf9c92a81ef260d28b5fb0d20fb7a33a2870c8ef9",
+    "output": "3695164dea0fd1820fe576dfb324b030e4442737b950cdd7fd9652e9d1cdd998"
   },
   "ztv reciprocal flat10": {
-    "input": "0b253a248085d369ac6f0bdf85374fac176debb11284ce6d96adf3498f6d8a7e",
-    "output": "00ac4df6a9ca2fd4d01b21c204eaa01a01925fd8b13df22200463225cb9c9fe0"
+    "input": "27121b1cfb66961173edf36cf9c92a81ef260d28b5fb0d20fb7a33a2870c8ef9",
+    "output": "81107b2d59e6d5048afa827c2d9af110b281656d89b792415fd2a1aba1245a26"
   },
   "ztv forward rough50curv": {
-    "input": "416997256ca252f2de7599554d4857f64574d771bb72b4f5a211df7a8e438eb9",
-    "output": "41162add3e7c5dbce819bf1b81c8b1b9fecfdc7da3db1739d4f27c37a6a95895"
+    "input": "2d3179d087d56e0ef85bfb0ce9325c5ee615555fb7778fce204be6613923fc86",
+    "output": "4efc4a035027ee5e6e3e05c1128f740f3412d02aa844a8466ccd2831a4849857"
   },
   "ztv reciprocal rough50curv": {
-    "input": "416997256ca252f2de7599554d4857f64574d771bb72b4f5a211df7a8e438eb9",
-    "output": "3e13de016412229c759dfbc3a25f5fbc4375588fe5cdec457053c10be25d8123"
+    "input": "2d3179d087d56e0ef85bfb0ce9325c5ee615555fb7778fce204be6613923fc86",
+    "output": "964807c46dd9bed06ac6b01d169dadc9c0f389ec938de07fcc34a0ebf6c16cde"
   },
   "ztv forward holes": {
-    "input": "f6d4a4abb2ef817d330ecd9014d9c4cd8dac822ab728d7e2b799dac180ca1128",
-    "output": "e2accfa6def8d245c1a2d2d2a51ad258c34bac585c7d59b7f48a2f4e52d017d3"
+    "input": "d0bee74ad6162a8c26bc4e658f491bda563a563334eabc478319d7ca64c35c8c",
+    "output": "abe9af1ebc571953ff4632d879c4d89869a2c4776738d994f66a5f3324fb4e47"
   },
   "ztv reciprocal holes": {
-    "input": "f6d4a4abb2ef817d330ecd9014d9c4cd8dac822ab728d7e2b799dac180ca1128",
-    "output": "7e1b072c777fed7d156db61dab99651c736638ff638b6f391a654320683556d0"
+    "input": "d0bee74ad6162a8c26bc4e658f491bda563a563334eabc478319d7ca64c35c8c",
+    "output": "2b6916e87110ab46bfff11d156d9cfaeb4aaff657e6364cc323881a21d694247"
   }
 }

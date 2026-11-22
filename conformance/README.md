@@ -66,6 +66,12 @@ change can't alter results unnoticed. Record new hashes with
 `python -m conformance.golden --update` only after a change has been verified
 cell for cell against the oracles.
 
+The scenes must be bit-identical on every platform and NumPy version, so their
+generators use only +, −, ×, ÷, sqrt and floor (`exact.py`: `wave`, `bump`,
+`noise`, and `math.fsum`-based `mean`/`std`). `np.sin`, `np.exp`, `rng.normal`
+and float reductions like `.std()` differ in the last bit between Linux, macOS,
+Windows and NumPy 1/2, which shows up as "input changed".
+
 ## Earth curvature and refraction
 
 Both oracles take `curvature`, `refraction` and `earth_radius`. In the bilinear

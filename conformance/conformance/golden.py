@@ -64,7 +64,7 @@ def cases():
     """(name, input array, function computing the output)."""
     rust = Rust("rviewshed")
     rust.available()
-    z = surface(2001)
+    z = surface(2001, seed=41)   # seed 41 puts the observer on a rise: ~1.5-4% visible
     gt = (0.0, 1.0, 0.0, 2001.0, 0.0, -1.0)
     yield ("viewshed r1000 flat", z,
            lambda: rust.run(Job(z, gt, (1000.5, 1000.5), 1.6, 0.0, 1000.0)))

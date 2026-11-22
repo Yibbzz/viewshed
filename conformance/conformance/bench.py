@@ -16,12 +16,12 @@ from .adapters import Gdal, Grass, Job, Rust
 
 def surface(n, seed=0):
     rng = np.random.default_rng(seed)
-    z = rng.normal(0, 1, (n, n))
+    z = exact.noise(rng, (n, n))
     for _ in range(6):
         z = (z + np.roll(z, 1, 0) + np.roll(z, -1, 0) + np.roll(z, 1, 1) + np.roll(z, -1, 1)) / 5
     c = np.arange(n) + 0.5
     x, y = np.meshgrid(c, c)
-    return z / exact.std(z) * 3 + 20 * np.sin(x / 150) * np.cos(y / 200)
+    return z / exact.std(z) * 3 + 20 * exact.wave(x / 150) * exact.cowave(y / 200)
 
 
 def main(argv=None):
