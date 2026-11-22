@@ -57,8 +57,12 @@ def _oracle(job):
                            job.max_distance, **job.curve_kwargs(), **kw)[0]
 
 
+@pytest.mark.parametrize("mode", ["rows", "horizon"])
 @pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs()])
-def test_bilinear_equals_oracle(job):
+def test_bilinear_equals_oracle(job, mode, monkeypatch):
+    # the crate picks a mode per raster (row-major walk, or rings with the horizon
+    # filters); both are exact, and both are checked here on every job
+    monkeypatch.setenv("VIEWSHED_MODE", mode)
     try:
         theirs = _oracle(job)
     except ValueError:                    # observer on no-data

@@ -18,6 +18,14 @@
 //! settled in exact rational arithmetic on its undecided patches; every other
 //! segment is certified clear, so that is the exact answer.
 //!
+//! Two ways through the cells, both exact: row-major chunks (cheap sightlines;
+//! neighbours share blockers and caches), or rings of increasing distance with
+//! horizon filters that certify a sightline's middle stretch clear, or the whole
+//! target hidden, from an angular table of slope bounds (see `Horizon`). A sample of
+//! cells, walked first, picks one: the horizon pays when many sightlines run close to
+//! the terrain (hilltops, masts, open ground), 25-40% faster there on real LiDAR and
+//! Copernicus DEMs; elsewhere its setup costs more than it saves.
+//!
 //! This follows the conformance suite's `certify.py` and `oracle_numba.py`, which
 //! hold the method to the plain exact oracle (`oracle.py`) cell for cell.
 
@@ -555,26 +563,26 @@ impl Pyramid {
         let (rows, cols) = (grid.rows as i64, grid.cols as i64);
         let (h, w) = ((rows + 1) as usize, (cols + 1) as usize);
         let mut patch = vec![f64::NEG_INFINITY; h * w];
-        for pr in 0..h {
-            for pc in 0..w {
+        patch.par_chunks_mut(w).enumerate().for_each(|(pr, row)| {
+            for (pc, v) in row.iter_mut().enumerate() {
                 let p = corners(grid, pr as i64 - 1, pc as i64 - 1);
                 if !nodata(&p) {
-                    patch[pr * w + pc] = p.z00.max(p.z01).max(p.z10).max(p.z11);
+                    *v = p.z00.max(p.z01).max(p.z10).max(p.z11);
                 }
             }
-        }
+        });
         let mut lvl = vec![f64::NEG_INFINITY; h * w];
-        for pr in 0..h {
-            for pc in 0..w {
+        lvl.par_chunks_mut(w).enumerate().for_each(|(pr, row)| {
+            for (pc, v) in row.iter_mut().enumerate() {
                 let mut m = f64::NEG_INFINITY;
                 for a in pr.saturating_sub(1)..(pr + 2).min(h) {
                     for b in pc.saturating_sub(1)..(pc + 2).min(w) {
                         m = m.max(patch[a * w + b]);
                     }
                 }
-                lvl[pr * w + pc] = m;
+                *v = m;
             }
-        }
+        });
         let mut data = lvl.clone();
         let mut offs = vec![0usize];
         let mut shapes = vec![(h as i64, w as i64)];
@@ -649,6 +657,8 @@ fn walk(
     r: i64,
     c: i64,
     failed: &mut [i64],
+    mid: Option<(f64, f64)>,
+    count: &mut usize,
 ) -> (State, i64, i64) {
     let (ue, ve, du, dv, ze, dz, delta) = (
         cell.ue, cell.ve, cell.du, cell.dv, cell.ze, cell.dz, cell.delta,
@@ -670,6 +680,9 @@ fn walk(
         }
         best
     };
+    // pyramid level to try first: one coarser after each skip, the finest after
+    // each evaluated segment (max-mipmap traversal)
+    let mut cur = nlev.saturating_sub(1);
     let mut ta = 0.0f64;
     let mut fa = near_observer_flag(cell) || peek(ui, vi, one) - ta <= lim || !delta.is_finite();
     let mut state = State::Clear;
@@ -699,13 +712,19 @@ fn walk(
             || !delta.is_finite();
         let last = nxt == f64::INFINITY;
         let tb = b;
-        // try to skip a block of patches on which the exact gap is certainly > 0
+        // a stretch the horizon certified clear (see Horizon), or else a block of
+        // patches on which the exact gap is certainly > 0, is skipped
         let mut skip_to = -1.0f64;
-        if delta.is_finite() {
+        if let Some((sa, sb)) = mid {
+            if ta >= sa && sb > tb {
+                skip_to = sb;
+            }
+        }
+        if skip_to < 0.0 && delta.is_finite() {
             let mid = (ta + tb) / 2.0;
             let pr = (ve + mid * dv).floor() as i64 + 1;
             let pc = (ue + mid * du).floor() as i64 + 1;
-            for lev in (1..nlev).rev() {
+            for lev in (1..=cur.min(nlev.saturating_sub(1))).rev() {
                 let (brr, bcc) = (pr >> lev, pc >> lev);
                 let (h, w) = pyr.shapes[lev];
                 if brr < 0 || bcc < 0 || brr >= h || bcc >= w {
@@ -745,6 +764,7 @@ fn walk(
                 let lb = lo - m + bl;
                 if lb - 16.0 * U * (lo.abs() + m.abs() + bl.abs()) > 0.0 {
                     skip_to = tx;
+                    cur = (lev + 1).min(nlev.saturating_sub(1));
                     break;
                 }
                 failed[lev] = key;
@@ -809,6 +829,8 @@ fn walk(
             ta = nta;
             continue;
         }
+        cur = 1;
+        *count += 1;
         if fa || fb {
             state = State::Undecided;
         } else {
@@ -1022,6 +1044,375 @@ fn within(s: &Setup, r: i64, c: i64, max: f64) -> bool {
     (&du * &du + &dv * &dv) * &res * &res <= &m * &m
 }
 
+// --- horizon filter ---------------------------------------------------------------
+//
+// A visible cell costs the walk a certified-clear segment for (nearly) every patch
+// on its sightline. The horizon filter certifies the middle of the sightline at once:
+// cells are processed in rings of increasing distance; before a ring, every patch
+// whose nearest point is closer than the ring is inserted into an angular table that
+// keeps, per sector, an upper bound on the steepest curvature-adjusted elevation
+// slope (h - drop d^2 - ze*) / d of any point of any inserted patch whose angular
+// span meets the sector. A sightline crosses only patches whose span contains its
+// direction, and a point is above the sightline exactly when its slope beats the
+// target's, (z_t + th - drop D^2 - ze*) / D. So if a lower bound on the target's
+// slope beats the table's maximum over the sectors around its direction, every exact
+// segment in the stretch crossing inserted patches is clear, and the walk skips it
+// (walk's `mid`). Patches near the observer are left out (their slope bounds are
+// useless), and the walk still does both ends: the near-observer part and the last
+// few cells up to the target, which aren't inserted yet.
+//
+// Rigour: every float bound carries a relative margin of 1e-12 (four orders above
+// the rounding error of the few operations involved) plus the observer coordinates'
+// measured errors, and angles are widened by 1e-9 rad plus their error.
+
+const NEAR: f64 = 3.0; // patches nearer than this many cells stay with the walk
+const SECTORS: usize = 8; // horizon sectors per cell of raster width
+const SAMPLE: usize = 2048; // cells walked first to choose the mode
+const HORIZON_AT: f64 = 3.4; // sampled segments per cell from which the horizon pays (measured on 22 real-terrain runs)
+const RING: f64 = 4.0; // ring width in cells
+const REL: f64 = 1e-12;
+
+struct Horizon {
+    max: Vec<f64>,
+    /// Per sector, a lower bound on the slope of a point that every ray through the
+    /// sector crosses (from patches covering the whole sector and entirely inserted).
+    low: Vec<f64>,
+    scale: f64,
+}
+
+impl Horizon {
+    fn new(n: usize) -> Horizon {
+        let s = n.next_power_of_two();
+        Horizon {
+            max: vec![f64::NEG_INFINITY; s],
+            low: vec![f64::NEG_INFINITY; s],
+            scale: s as f64 / (2.0 * std::f64::consts::PI),
+        }
+    }
+
+    /// Record a patch whose angular span certainly contains [lo, hi] for the sectors
+    /// lying wholly inside it.
+    fn insert_low(&mut self, lo: f64, hi: f64, v: f64) {
+        let n = self.max.len() as i64;
+        let pi = std::f64::consts::PI;
+        // sector k covers [k / scale - pi, (k + 1) / scale - pi]; the shrink keeps the
+        // float sector edges inside the span
+        let a = ((lo + pi) * self.scale).ceil() as i64 + 1;
+        let b = ((hi + pi) * self.scale).floor() as i64 - 2;
+        let mut k = a;
+        while k <= b {
+            let i = k.rem_euclid(n) as usize;
+            if v > self.low[i] {
+                self.low[i] = v;
+            }
+            k += 1;
+        }
+    }
+
+    /// The least of the lower bounds over the sectors meeting [lo, hi]: the true
+    /// direction lies in one of them.
+    fn query_low(&self, lo: f64, hi: f64) -> f64 {
+        let n = self.max.len() as i64;
+        let (a, b) = self.range(lo, hi);
+        let mut m = f64::INFINITY;
+        let mut k = a;
+        while k <= b {
+            m = m.min(self.low[k.rem_euclid(n) as usize]);
+            k += 1;
+        }
+        m
+    }
+
+    fn sector(&self, theta: f64) -> i64 {
+        ((theta + std::f64::consts::PI) * self.scale).floor() as i64
+    }
+
+    /// Sectors meeting [lo, hi] (angles in radians, lo <= hi, span < pi), wrapping.
+    fn range(&self, lo: f64, hi: f64) -> (i64, i64) {
+        (self.sector(lo), self.sector(hi))
+    }
+
+    fn insert(&mut self, lo: f64, hi: f64, v: f64) {
+        let n = self.max.len() as i64;
+        let (a, b) = self.range(lo, hi);
+        let mut k = a;
+        while k <= b {
+            let i = k.rem_euclid(n) as usize;
+            if v > self.max[i] {
+                self.max[i] = v;
+            }
+            k += 1;
+        }
+    }
+
+    fn query(&self, lo: f64, hi: f64) -> f64 {
+        let n = self.max.len() as i64;
+        let (a, b) = self.range(lo, hi);
+        let mut m = f64::NEG_INFINITY;
+        let mut k = a;
+        while k <= b {
+            m = m.max(self.max[k.rem_euclid(n) as usize]);
+            k += 1;
+        }
+        m
+    }
+}
+
+/// A patch ready for the horizon: its nearest distance (a lower bound), its angular
+/// span (widened) and an upper bound on the slope of any of its points.
+struct HPatch {
+    lo: f64,
+    hi: f64,
+    slope: f64,
+    /// upper bound on the farthest distance, the span shrunk (certainly inside the
+    /// true one), and a lower bound on the slope of any point of the patch
+    dmax: f64,
+    lo_in: f64,
+    hi_in: f64,
+    slope_low: f64,
+}
+
+/// Lower bound on (h - drop d^2 - ze*) / d over d in [dl, dh], h >= hmin.
+fn slope_lo(hmin: f64, ze_hi: f64, drop: f64, dl: f64, dh: f64) -> f64 {
+    let dd = if drop >= 0.0 { dh } else { dl };
+    let n = hmin - ze_hi - drop * dd * dd;
+    let n = n - REL * (hmin.abs() + ze_hi.abs() + (drop * dd * dd).abs());
+    let v = if n >= 0.0 { n / dh } else { n / dl };
+    v - REL * v.abs()
+}
+
+/// Upper bound on (h - drop d^2 - ze*) / d over d in [dl, dh], h <= hmax.
+fn slope_hi(hmax: f64, ze_lo: f64, drop: f64, dl: f64, dh: f64) -> f64 {
+    let dd = if drop >= 0.0 { dl } else { dh };
+    let n = hmax - ze_lo - drop * dd * dd;
+    let n = n + REL * (hmax.abs() + ze_lo.abs() + (drop * dd * dd).abs());
+    let v = if n >= 0.0 { n / dl } else { n / dh };
+    v + REL * v.abs()
+}
+
+/// Nearest distance from the observer to patch (r0, c0), before margins.
+fn patch_dmin(s: &Setup, r0: i64, c0: i64) -> f64 {
+    let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + 1) as f64 - s.ue, r0 as f64 - s.ve, (r0 + 1) as f64 - s.ve);
+    let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
+    let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
+    (dx * dx + dy * dy).sqrt() * s.res
+}
+
+/// The horizon record of patch (r0, c0) (nearest distance `d0` from patch_dmin), or
+/// None for a patch without data.
+fn prepare_patch(grid: &Grid, s: &Setup, r0: i64, c0: i64, d0: f64) -> Option<HPatch> {
+    let p = corners(grid, r0, c0);
+    if nodata(&p) {
+        return None;
+    }
+    let res = s.res;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + 1) as f64 - s.ue, r0 as f64 - s.ve, (r0 + 1) as f64 - s.ve);
+    let dmin = d0 * (1.0 - REL) - 2.0 * e_pos;
+    let mut dmax: f64 = 0.0;
+    let centre = ((v0 + v1) / 2.0).atan2((u0 + u1) / 2.0);
+    let (mut alo, mut ahi) = (0.0f64, 0.0f64);
+    for (u, v) in [(u0, v0), (u1, v0), (u0, v1), (u1, v1)] {
+        dmax = dmax.max((u * u + v * v).sqrt());
+        let mut a = v.atan2(u) - centre;
+        if a > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
+        } else if a < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        alo = alo.min(a);
+        ahi = ahi.max(a);
+    }
+    let dmax = dmax * res * (1.0 + REL) + 2.0 * e_pos;
+    let widen = 1e-9 + 8.0 * e_pos / dmin;
+    let hmax = p.z00.max(p.z01).max(p.z10).max(p.z11);
+    let hmin = p.z00.min(p.z01).min(p.z10).min(p.z11);
+    Some(HPatch {
+        lo: centre + alo - widen,
+        hi: centre + ahi + widen,
+        slope: slope_hi(hmax, s.ze - s.e_ze, s.drop, dmin, dmax),
+        dmax,
+        lo_in: centre + alo + widen,
+        hi_in: centre + ahi - widen,
+        slope_low: slope_lo(hmin, s.ze + s.e_ze, s.drop, dmin, dmax),
+    })
+}
+
+/// The ring before which something at distance d (map units) must be inserted: the
+/// first ring k with d < (k RING - 1) res.
+fn ring_of(d: f64, res: f64) -> usize {
+    ((d / res + 1.0) / RING).floor() as usize + 1
+}
+
+/// Group items by a small integer key, keeping nothing else in order (counting sort).
+fn bucket<T: Copy + Send>(items: &[(usize, T)], n: usize) -> Vec<Vec<T>> {
+    let mut out: Vec<Vec<T>> = (0..n).map(|_| Vec::new()).collect();
+    for &(k, v) in items {
+        out[k.min(n - 1)].push(v);
+    }
+    out
+}
+
+/// Bounds on the target's slope (z_t + th - drop D^2 - ze*) / D, its direction, and
+/// the direction's error margin; None when delta makes the stretch bounds unsafe.
+fn target_slope(s: &Setup, cell: &Cell, zt: f64) -> Option<(f64, f64, f64, f64, f64)> {
+    let res = s.res;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let dist = (cell.du * cell.du + cell.dv * cell.dv).sqrt() * res;
+    if !cell.delta.is_finite() || cell.delta * dist > 0.25 * res || dist < 2.0 * res {
+        return None;
+    }
+    let d_lo = dist * (1.0 - REL) - 2.0 * e_pos;
+    let d_hi = dist * (1.0 + REL) + 2.0 * e_pos;
+    let h = zt + s.th;
+    let lo = {
+        let dd = if s.drop >= 0.0 { d_hi } else { d_lo };
+        let n = h - s.drop * dd * dd - (s.ze + s.e_ze);
+        let n = n - REL * (h.abs() + (s.drop * dd * dd).abs() + s.ze.abs() + s.e_ze);
+        let v = if n >= 0.0 { n / d_hi } else { n / d_lo };
+        v - REL * v.abs()
+    };
+    let hi = {
+        let dd = if s.drop >= 0.0 { d_lo } else { d_hi };
+        let n = h - s.drop * dd * dd - (s.ze - s.e_ze);
+        let n = n + REL * (h.abs() + (s.drop * dd * dd).abs() + s.ze.abs() + s.e_ze);
+        let v = if n >= 0.0 { n / d_lo } else { n / d_hi };
+        v + REL * v.abs()
+    };
+    let theta = cell.dv.atan2(cell.du);
+    let widen = 1e-9 + 8.0 * e_pos / d_lo;
+    Some((lo, hi, theta, widen, dist))
+}
+
+/// The middle stretch of the sightline (in t) that the horizon certifies clear, given
+/// that every patch with nearest distance < `inserted` is in `h`.
+fn horizon_stretch(h: &Horizon, s: &Setup, ts: (f64, f64, f64, f64, f64), inserted: f64) -> Option<(f64, f64)> {
+    let (lo, _, theta, widen, dist) = ts;
+    let res = s.res;
+    // t_a: beyond it every patch crossed is at least NEAR cells away; t_b: up to it
+    // every patch crossed has its nearest point before `inserted`
+    let t_a = (NEAR * res + 2.0 * res) / dist;
+    let t_b = (inserted - 0.5 * res) / dist;
+    if !(t_b > t_a + 0.01) {
+        return None;
+    }
+    if lo > h.query(theta - widen, theta + widen) {
+        Some((t_a, t_b))
+    } else {
+        None
+    }
+}
+
+/// Whether the horizon certifies the target hidden: some patch entirely nearer than
+/// the target, crossed by its ray, has every point above the sightline.
+fn horizon_hidden(h: &Horizon, ts: (f64, f64, f64, f64, f64)) -> bool {
+    let (_, hi, theta, widen, _) = ts;
+    h.query_low(theta - widen, theta + widen) > hi
+}
+
+/// The deferred cells with the horizon filters, in rings of increasing distance.
+fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
+    let (rows, cols) = (grid.rows, grid.cols);
+    let nlev = pyr.shapes.len();
+    let res = s.res;
+    // the cells by ring, each ring by angle
+    let keyed: Vec<(usize, (f64, i64, i64))> = cells
+        .par_iter()
+        .map(|&(r, c)| {
+            let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
+            let d = (du * du + dv * dv).sqrt();
+            ((d / RING).floor() as usize, (dv.atan2(du), r, c))
+        })
+        .collect();
+    let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / RING) as usize + 4;
+    let mut rings = bucket(&keyed, n_rings);
+    rings.par_iter_mut().for_each(|ring| ring.sort_unstable_by(|a, b| a.0.total_cmp(&b.0)));
+    // every patch, by the ring before which it enters the horizon (prepared lazily)
+    let (rows_i, cols_i) = (rows as i64, cols as i64);
+    let near = NEAR * res;
+    let pkeys: Vec<(usize, (i64, i64, f64))> = (-1..rows_i)
+        .into_par_iter()
+        .flat_map_iter(|r0| {
+            (-1..cols_i).filter_map(move |c0| {
+                let d0 = patch_dmin(s, r0, c0);
+                if d0 < near {
+                    None
+                } else {
+                    Some((ring_of(d0, res), (r0, c0, d0)))
+                }
+            })
+        })
+        .collect();
+    let pbuckets = bucket(&pkeys, n_rings);
+    let mut low_pending: Vec<Vec<HPatch>> = (0..n_rings).map(|_| Vec::new()).collect();
+    let mut horizon = Horizon::new(SECTORS * rows.max(cols));
+    for ring in 0..n_rings {
+        // every patch nearer than the ring's inner edge (less a cell, for rounding)
+        let inserted = ((ring as f64) * RING - 1.0) * res;
+        if !pbuckets[ring].is_empty() {
+            let prepared: Vec<HPatch> = pbuckets[ring]
+                .par_iter()
+                .filter_map(|&(r0, c0, d0)| prepare_patch(grid, s, r0, c0, d0))
+                .collect();
+            for p in prepared {
+                horizon.insert(p.lo, p.hi, p.slope);
+                let k = ring_of(p.dmax, res).max(ring).min(n_rings - 1);
+                low_pending[k].push(p);
+            }
+        }
+        for p in std::mem::take(&mut low_pending[ring]) {
+            if p.hi_in > p.lo_in {
+                horizon.insert_low(p.lo_in, p.hi_in, p.slope_low);
+            }
+        }
+        if rings[ring].is_empty() {
+            continue;
+        }
+        let h = &horizon;
+        let results: Vec<(usize, bool)> = rings[ring]
+            .par_chunks(64)
+            .flat_map_iter(|chunk| {
+                let mut failed = vec![-1i64; nlev];
+                let mut blocker: Option<(i64, i64)> = None;
+                let mut out = Vec::with_capacity(chunk.len());
+                for &(_, r, c) in chunk {
+                    let zt = grid.at(r as usize, c as usize);
+                    let cell = make_cell(s, zt, r, c);
+                    let idx = r as usize * cols + c as usize;
+                    if let Some((br, bc)) = blocker {
+                        if reuse_blocks(&cell, grid, br, bc) {
+                            out.push((idx, false));
+                            continue;
+                        }
+                    }
+                    let tsl = target_slope(s, &cell, zt);
+                    if let Some(t) = tsl {
+                        if horizon_hidden(h, t) {
+                            out.push((idx, false));
+                            continue;
+                        }
+                    }
+                    let mid = tsl.and_then(|t| horizon_stretch(h, s, t, inserted));
+                    let (st, r0, c0) = walk(&cell, grid, pyr, r, c, &mut failed, mid, &mut 0);
+                    let visible = match st {
+                        State::Blocking => {
+                            blocker = Some((r0, c0));
+                            false
+                        }
+                        State::Undecided => !blocked_exact(grid, s, &cell, r, c),
+                        _ => true,
+                    };
+                    out.push((idx, visible));
+                }
+                out.into_iter()
+            })
+            .collect();
+        for (k, v) in results {
+            seen[k] = v;
+        }
+    }
+}
+
 pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
     if !grid.inside(x, y) {
         return Err(Error::ObserverOutside);
@@ -1065,38 +1456,85 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     }
     let pyr = Pyramid::new(grid);
     let nlev = pyr.shapes.len();
-    let results: Vec<(usize, bool)> = cells
-        .par_chunks(512)
-        .flat_map_iter(|chunk| {
-            let mut failed = vec![-1i64; nlev];
-            let mut blocker: Option<(i64, i64)> = None;
-            let mut out = Vec::with_capacity(chunk.len());
-            for &(r, c) in chunk {
-                let cell = make_cell(&s, grid.at(r as usize, c as usize), r, c);
-                let idx = r as usize * cols + c as usize;
-                if let Some((br, bc)) = blocker {
-                    if reuse_blocks(&cell, grid, br, bc) {
-                        out.push((idx, false));
-                        continue;
+    // Two exact ways through the cells: row-major chunks (neighbouring sightlines
+    // share blockers, cache lines and pyramid blocks; best when sightlines are cheap)
+    // or rings with the horizon filters (pays when many sightlines run close to the
+    // terrain). A sample of cells, walked first, picks one.
+    let mut seen = vec![false; rows * cols];
+    // VIEWSHED_MODE=rows|horizon forces a mode (the conformance tests run both)
+    let forced = match std::env::var("VIEWSHED_MODE").as_deref() {
+        Ok("rows") => Some(false),
+        Ok("horizon") => Some(true),
+        _ => None,
+    };
+    let use_horizon = if let Some(f) = forced {
+        f
+    } else if cells.len() >= 16 * SAMPLE {
+        // runs of consecutive cells, walked as the row-major pass walks them (with
+        // blocker reuse), so the count predicts that pass's cost
+        let runs = 16;
+        let len = SAMPLE / runs;
+        let stride = cells.len() / runs;
+        let work: usize = (0..runs)
+            .into_par_iter()
+            .map(|k| {
+                let mut failed = vec![-1i64; nlev];
+                let mut blocker: Option<(i64, i64)> = None;
+                let mut n = 0;
+                for &(r, c) in &cells[k * stride..k * stride + len] {
+                    let cell = make_cell(&s, grid.at(r as usize, c as usize), r, c);
+                    n += 1;
+                    if let Some((br, bc)) = blocker {
+                        if reuse_blocks(&cell, grid, br, bc) {
+                            continue;
+                        }
+                    }
+                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, None, &mut n);
+                    if st == State::Blocking {
+                        blocker = Some((r0, c0));
                     }
                 }
-                let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed);
-                let visible = match st {
-                    State::Blocking => {
-                        blocker = Some((r0, c0));
-                        false
+                n
+            })
+            .sum();
+        work as f64 / SAMPLE as f64 >= HORIZON_AT
+    } else {
+        false
+    };
+    if use_horizon {
+        horizon_phase(grid, &s, &pyr, &cells, &mut seen);
+    } else {
+        let decided: Vec<(usize, bool)> = cells
+            .par_chunks(512)
+            .flat_map_iter(|chunk| {
+                let mut failed = vec![-1i64; nlev];
+                let mut blocker: Option<(i64, i64)> = None;
+                let mut out = Vec::with_capacity(chunk.len());
+                for &(r, c) in chunk {
+                    let cell = make_cell(&s, grid.at(r as usize, c as usize), r, c);
+                    let idx = r as usize * cols + c as usize;
+                    if let Some((br, bc)) = blocker {
+                        if reuse_blocks(&cell, grid, br, bc) {
+                            out.push((idx, false));
+                            continue;
+                        }
                     }
-                    State::Undecided => !blocked_exact(grid, &s, &cell, r, c),
-                    _ => true,
-                };
-                out.push((idx, visible));
-            }
-            out.into_iter()
-        })
-        .collect();
-    let mut seen = vec![false; rows * cols];
-    for (i, v) in results {
-        seen[i] = v;
+                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, None, &mut 0);
+                    out.push((idx, match st {
+                        State::Blocking => {
+                            blocker = Some((r0, c0));
+                            false
+                        }
+                        State::Undecided => !blocked_exact(grid, &s, &cell, r, c),
+                        _ => true,
+                    }));
+                }
+                out.into_iter()
+            })
+            .collect();
+        for (idx, v) in decided {
+            seen[idx] = v;
+        }
     }
     Ok(seen)
 }
