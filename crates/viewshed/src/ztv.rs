@@ -107,10 +107,7 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
                     ..opts.view()
                 };
                 let seen = crate::viewshed(grid, tg.x, tg.y, &o)?;
-                counts
-                    .iter_mut()
-                    .zip(seen)
-                    .for_each(|(n, v)| *n += v as u32);
+                counts.iter_mut().zip(seen).for_each(|(n, v)| *n += v as u32);
             }
             Ok(counts)
         }
@@ -119,34 +116,20 @@ pub fn ztv(grid: &Grid, targets: &[ZtvTarget], opts: &ZtvOptions) -> Result<Vec<
             let drop = opts.view().drop_factor();
             let pyramid = MaxPyramid::new(grid);
             let mut counts = vec![0u32; grid.rows * cols];
-            counts
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(r, row)| {
-                    for (c, n) in row.iter_mut().enumerate() {
-                        let z = grid.at(r, c);
-                        if z.is_nan() {
-                            continue;
-                        }
-                        let eye = z + opts.observer_height;
-                        for &(rt, ct, h) in &cells {
-                            if sees(
-                                grid,
-                                &pyramid,
-                                r as i64,
-                                c as i64,
-                                eye,
-                                drop,
-                                rt,
-                                ct,
-                                h,
-                                opts.max_distance,
-                            ) {
-                                *n += 1;
-                            }
+            counts.par_chunks_mut(cols).enumerate().for_each(|(r, row)| {
+                for (c, n) in row.iter_mut().enumerate() {
+                    let z = grid.at(r, c);
+                    if z.is_nan() {
+                        continue;
+                    }
+                    let eye = z + opts.observer_height;
+                    for &(rt, ct, h) in &cells {
+                        if sees(grid, &pyramid, r as i64, c as i64, eye, drop, rt, ct, h, opts.max_distance) {
+                            *n += 1;
                         }
                     }
-                });
+                }
+            });
             Ok(counts)
         }
     }
@@ -160,11 +143,7 @@ pub(crate) struct MaxPyramid {
 
 impl MaxPyramid {
     pub(crate) fn new(grid: &Grid) -> Self {
-        let base: Vec<f64> = grid
-            .z
-            .iter()
-            .map(|&v| if v.is_nan() { f64::NEG_INFINITY } else { v })
-            .collect();
+        let base: Vec<f64> = grid.z.iter().map(|&v| if v.is_nan() { f64::NEG_INFINITY } else { v }).collect();
         let mut levels = vec![(grid.rows, grid.cols, base)];
         while {
             let (r, c, _) = levels.last().unwrap();
@@ -251,16 +230,8 @@ pub(crate) fn sees(
     // cell of the minor axis, so 4 candidates per step cover every cell it
     // crosses. Each candidate is then tested exactly: strictly closer than the
     // target, and the target direction strictly inside its corner span.
-    let (n, x_major) = if dc.abs() >= dr.abs() {
-        (dc.abs(), true)
-    } else {
-        (dr.abs(), false)
-    };
-    let (major_sign, minor_end, major_end) = if x_major {
-        (dc.signum(), dr, dc)
-    } else {
-        (dr.signum(), dc, dr)
-    };
+    let (n, x_major) = if dc.abs() >= dr.abs() { (dc.abs(), true) } else { (dr.abs(), false) };
+    let (major_sign, minor_end, major_end) = if x_major { (dc.signum(), dr, dc) } else { (dr.signum(), dc, dr) };
     let minor_at = |i: i64| (i * major_sign) as f64 * minor_end as f64 / major_end as f64;
     let mut visit = |i: i64| -> bool {
         let major = i * major_sign;
@@ -361,9 +332,7 @@ mod tests {
     fn terrain(n: usize, seed: u64, integer: bool, holes: bool) -> Vec<f64> {
         let mut s = seed;
         let mut next = || {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             (s >> 11) as f64 / (1u64 << 53) as f64
         };
         let mut z = vec![0.0; n * n];
@@ -403,60 +372,24 @@ mod tests {
             let mut targets = Vec::new();
             for (r, c, h) in [(3usize, 4usize, 5.0), (n / 2, n / 2, 0.0), (n - 2, 1, 12.5)] {
                 if !z[r * n + c].is_nan() {
-                    targets.push((
-                        r,
-                        c,
-                        ZtvTarget {
-                            x: c as f64 + 0.5,
-                            y: (n - r) as f64 - 0.5,
-                            height: h,
-                        },
-                    ));
+                    targets.push((r, c, ZtvTarget { x: c as f64 + 0.5, y: (n - r) as f64 - 0.5, height: h }));
                 }
             }
-            let opts = ZtvOptions {
-                observer_height: 1.5,
-                curvature,
-                earth_radius: 60.0,
-                ..ZtvOptions::default()
-            };
-            let counts = ztv(
-                &grid,
-                &targets.iter().map(|t| t.2).collect::<Vec<_>>(),
-                &opts,
-            )
-            .unwrap();
+            let opts = ZtvOptions { observer_height: 1.5, curvature, earth_radius: 60.0, ..ZtvOptions::default() };
+            let counts = ztv(&grid, &targets.iter().map(|t| t.2).collect::<Vec<_>>(), &opts).unwrap();
             for r in 0..n {
                 for c in 0..n {
                     if z[r * n + c].is_nan() {
                         assert_eq!(counts[r * n + c], 0);
                         continue;
                     }
-                    let o = Options {
-                        observer_height: 1.5,
-                        curvature,
-                        earth_radius: 60.0,
-                        ..Options::default()
-                    };
+                    let o = Options { observer_height: 1.5, curvature, earth_radius: 60.0, ..Options::default() };
                     let mut expect = 0;
                     for &(tr, tc, t) in &targets {
-                        let v = viewshed(
-                            &grid,
-                            c as f64 + 0.5,
-                            (n - r) as f64 - 0.5,
-                            &Options {
-                                target_height: t.height,
-                                ..o.clone()
-                            },
-                        )
-                        .unwrap();
+                        let v = viewshed(&grid, c as f64 + 0.5, (n - r) as f64 - 0.5, &Options { target_height: t.height, ..o.clone() }).unwrap();
                         expect += v[tr * n + tc] as u32;
                     }
-                    assert_eq!(
-                        counts[r * n + c],
-                        expect,
-                        "seed {seed}, observer ({r}, {c})"
-                    );
+                    assert_eq!(counts[r * n + c], expect, "seed {seed}, observer ({r}, {c})");
                 }
             }
         }
@@ -467,21 +400,9 @@ mod tests {
         let n = 41;
         let z = terrain(n, 9, false, false);
         let grid = Grid::new(&z, n, n, [0.0, 1.0, 0.0, n as f64, 0.0, -1.0]).unwrap();
-        let targets = [ZtvTarget {
-            x: 20.5,
-            y: 20.5,
-            height: 30.0,
-        }];
+        let targets = [ZtvTarget { x: 20.5, y: 20.5, height: 30.0 }];
         let f = ztv(&grid, &targets, &ZtvOptions::default()).unwrap();
-        let r = ztv(
-            &grid,
-            &targets,
-            &ZtvOptions {
-                method: ZtvMethod::Reciprocal,
-                ..ZtvOptions::default()
-            },
-        )
-        .unwrap();
+        let r = ztv(&grid, &targets, &ZtvOptions { method: ZtvMethod::Reciprocal, ..ZtvOptions::default() }).unwrap();
         let differ = f.iter().zip(&r).filter(|(a, b)| a != b).count();
         assert!(differ * 20 < n * n, "{differ} of {} cells differ", n * n);
     }

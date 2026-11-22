@@ -40,11 +40,7 @@ pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// The height array length doesn't equal rows × cols.
-    ShapeMismatch {
-        len: usize,
-        rows: usize,
-        cols: usize,
-    },
+    ShapeMismatch { len: usize, rows: usize, cols: usize },
     /// Rotated rasters (non-zero rotation terms) aren't supported.
     Rotated,
     /// Cells must be square and the cell size non-zero.
@@ -67,10 +63,7 @@ impl fmt::Display for Error {
             Error::NonSquareCells => write!(f, "cells must be square with a non-zero size"),
             Error::ObserverOutside => write!(f, "the observer is outside the raster"),
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
-            Error::TooLarge => write!(
-                f,
-                "the area searched is over 1,000,000 cells across; set max_distance"
-            ),
+            Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
         }
     }
 }
@@ -90,11 +83,7 @@ pub struct Grid<'a> {
 impl<'a> Grid<'a> {
     pub fn new(z: &'a [f64], rows: usize, cols: usize, transform: [f64; 6]) -> Result<Self, Error> {
         if z.len() != rows * cols {
-            return Err(Error::ShapeMismatch {
-                len: z.len(),
-                rows,
-                cols,
-            });
+            return Err(Error::ShapeMismatch { len: z.len(), rows, cols });
         }
         if transform[2] != 0.0 || transform[4] != 0.0 {
             return Err(Error::Rotated);
@@ -103,12 +92,7 @@ impl<'a> Grid<'a> {
         if w == 0.0 || (w - h).abs() > 1e-9 * w {
             return Err(Error::NonSquareCells);
         }
-        Ok(Grid {
-            z,
-            rows,
-            cols,
-            transform,
-        })
+        Ok(Grid { z, rows, cols, transform })
     }
 
     fn res(&self) -> f64 {
@@ -273,10 +257,7 @@ mod tests {
     fn flat_ground_is_all_visible() {
         let z = flat(50.0);
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        assert!(viewshed(&g, 20.5, 20.5, &Options::default())
-            .unwrap()
-            .iter()
-            .all(|&v| v));
+        assert!(viewshed(&g, 20.5, 20.5, &Options::default()).unwrap().iter().all(|&v| v));
     }
 
     #[test]
@@ -300,10 +281,7 @@ mod tests {
             z[15 * 41 + c] = 5.0;
         }
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        let opts = Options {
-            observer_height: 50.0,
-            ..Options::default()
-        };
+        let opts = Options { observer_height: 50.0, ..Options::default() };
         assert!(viewshed(&g, 20.5, 20.5, &opts).unwrap()[5 * 41 + 20]);
     }
 
@@ -312,10 +290,7 @@ mod tests {
         let mut z = flat(0.0);
         z[0] = f64::NAN;
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        let opts = Options {
-            max_distance: Some(10.0),
-            ..Options::default()
-        };
+        let opts = Options { max_distance: Some(10.0), ..Options::default() };
         let seen = viewshed(&g, 20.5, 20.5, &opts).unwrap();
         assert!(seen[20 * 41 + 25]);
         assert!(!seen[20 * 41 + 35]);
@@ -330,46 +305,21 @@ mod tests {
         let (h, k) = (1.6, 0.13);
         let r = (1.0 - k) * 10.5 * 10.5 / (2.0 * h);
         for surface in [Surface::RViewshed, Surface::Bilinear] {
-            let opts = Options {
-                observer_height: h,
-                refraction: k,
-                earth_radius: r,
-                surface,
-                ..Options::default()
-            };
+            let opts = Options { observer_height: h, refraction: k, earth_radius: r, surface, ..Options::default() };
             let seen = viewshed(&g, 20.5, 20.5, &opts).unwrap();
             assert!(seen[20 * 41 + 20 + 9], "{surface:?}: within the horizon");
             assert!(!seen[20 * 41 + 20 + 12], "{surface:?}: beyond the horizon");
-            let flat_earth = Options {
-                curvature: false,
-                ..opts
-            };
-            assert!(viewshed(&g, 20.5, 20.5, &flat_earth)
-                .unwrap()
-                .iter()
-                .all(|&v| v));
+            let flat_earth = Options { curvature: false, ..opts };
+            assert!(viewshed(&g, 20.5, 20.5, &flat_earth).unwrap().iter().all(|&v| v));
         }
     }
 
     #[test]
     fn bad_input_is_an_error() {
         let z = flat(0.0);
-        assert_eq!(
-            Grid::new(&z, 40, 41, GT).unwrap_err(),
-            Error::ShapeMismatch {
-                len: 1681,
-                rows: 40,
-                cols: 41
-            }
-        );
-        assert_eq!(
-            Grid::new(&z, 41, 41, [0.0, 1.0, 0.1, 41.0, 0.0, -1.0]).unwrap_err(),
-            Error::Rotated
-        );
+        assert_eq!(Grid::new(&z, 40, 41, GT).unwrap_err(), Error::ShapeMismatch { len: 1681, rows: 40, cols: 41 });
+        assert_eq!(Grid::new(&z, 41, 41, [0.0, 1.0, 0.1, 41.0, 0.0, -1.0]).unwrap_err(), Error::Rotated);
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        assert_eq!(
-            viewshed(&g, 100.0, 0.0, &Options::default()).unwrap_err(),
-            Error::ObserverOutside
-        );
+        assert_eq!(viewshed(&g, 100.0, 0.0, &Options::default()).unwrap_err(), Error::ObserverOutside);
     }
 }
