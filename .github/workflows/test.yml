@@ -56,3 +56,33 @@ jobs:
         env:
           CONFORMANCE_STRICT: "1"
         run: '"$PY" -m pytest -q -rs tests'
+
+  grass:
+    # The two tests that tie oracle_rviewshed to GRASS r.viewshed itself (every
+    # cell, flat and with curvature). They skip where GRASS isn't installed, so
+    # this job fails if they didn't run. GRASS's Python side needs the distro's
+    # GDAL bindings, hence a venv on the system Python with its site-packages.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install GRASS and GDAL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends grass-core python3-gdal python3-numpy python3-pytest python3-venv
+          grass --version
+      - name: Build and install
+        working-directory: python
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install maturin
+          VIRTUAL_ENV=$PWD/.venv .venv/bin/python -m maturin develop --release
+      - name: Conformance tests including GRASS
+        working-directory: conformance
+        env:
+          CONFORMANCE_STRICT: "1"
+        run: |
+          ../python/.venv/bin/python -m pytest -q -rs tests | tee pytest.out
+          if grep -q "GRASS GIS not installed" pytest.out; then
+            echo "::error::GRASS tests were skipped"; exit 1
+          fi
