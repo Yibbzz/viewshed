@@ -23,7 +23,8 @@ jobs:
 
   python:
     # Builds the package and runs its tests plus the conformance suite (oracles,
-    # analytic scenes, golden outputs, sweep and bindings cell for cell). GRASS and
+    # analytic scenes, golden outputs, sweep and bindings cell for cell, and the
+    # fast oracles bit for bit against oracle.py, numba included). GRASS and
     # GDAL tests are skipped where those aren't installed. uv supplies each Python,
     # including 3.9 (the oldest the abi3 wheel supports), which the runners no
     # longer ship.
@@ -45,7 +46,8 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} .venv
           PY=$([ "$RUNNER_OS" = Windows ] && echo .venv/Scripts/python || echo .venv/bin/python)
-          uv pip install --python .venv maturin pytest numpy
+          uv pip install --python .venv maturin pytest numpy numba
+          "$PY" -c "import numba; print('numba', numba.__version__)"   # oracle_numba's tests must run
           VIRTUAL_ENV=$PWD/.venv "$PY" -m maturin develop --release
           echo "PY=$PWD/$PY" >> "$GITHUB_ENV"
       - name: Package tests

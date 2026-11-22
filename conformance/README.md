@@ -36,6 +36,29 @@ smooth mathematical surface, and both are compared with true visibility on it
   quadratic minimised in closed form, and near-ties are redone in exact rational
   arithmetic. Gives visibility and clearance per cell. Results are cached in
   `.cache/` by a hash of the inputs.
+- **`oracle_fast.py` and `oracle_numba.py`, the same oracle, faster.** Bit-identical
+  to `oracle.py`: the same visibility, the same clearance to the last bit, and the
+  same cells sent to exact arithmetic (`tests/test_oracle_fast.py`, which is
+  built around ties: integer heights, plateaus, observers on corners, no-data,
+  tiny earth radii). They get there by doing the same IEEE operations in the same
+  order: NumPy and numba (no fastmath, so no fused multiply-adds) round exactly as
+  CPython floats do. `oracle_fast.fastest()` picks numba when it is installed
+  (`pip install .[fast]`), and the adapters and `run.py` use it.
+  - `oracle_fast`: NumPy, every sightline's segments in one padded array. ~10x.
+  - `oracle_numba`: the reference's loops compiled and run in parallel, with
+    each sightline's boundaries merged rather than sorted. ~200x (121 x 121: 30 ms
+    against 6.9 s).
+  - `oracle_numba.viewshed(..., clearance=False)`: visibility only, which is all
+    a cell-for-cell check needs. The reference's decision only asks whether some
+    segment is below -tol, all are above +tol, or neither, so it can skip blocks
+    of patches whose lower bound on the gap (from a max-pyramid, widened by one
+    patch and kept `tol` clear of rounding) is above +tol, stop at the first
+    segment below -tol, generate boundaries as a stream so skips cost nothing, and
+    try the previous cell's blocker first. 1001 x 1001 in 0.2-0.6 s, against about
+    11 s for the full numba pass and an estimated hour for `oracle.py`.
+  - The exact fallback reads the raster lazily (`oracle_fast.blocked_exact`):
+    `oracle.py` converts the whole raster to `Fraction`s per call, 1.8 s at
+    1001 x 1001.
 - **`oracle_rviewshed.py`, the r.viewshed model.** What GRASS `r.viewshed`
   actually computes, written from a description of the method (not GRASS's GPL
   code): each closer cell is reduced to three gradient samples (the two corners
@@ -93,7 +116,11 @@ many cells). The d²/(2R) drop is within 1 mm of a true sphere out to 35 km.
   the observer height twice. Neither showed up on the synthetic rasters.
 - Real 1 m EA LiDAR DSM tiles (oracle on a sample plus shadow-edge cells).
 - Peak memory, charts, the pinned Docker image and the CI job with gates.
-- A faster (vectorised or compiled) bilinear oracle: about 0.3 ms per cell in pure Python.
+- Faster clearance: the full numba pass still walks every segment, because the
+  exact minimum gap rules out bounding against fixed thresholds (best-first
+  branch and bound may help).
+- A faster exact fallback: tie-heavy rasters (integer heights, plateaus) send
+  thousands of cells to `Fraction` arithmetic, which dominates there.
 
 `tests/test_rust_sweep.py` requires the Rust sweep to equal `oracle_rviewshed`
 on every cell of every dataset, scene and 40 random rasters (no-data, integer

@@ -80,9 +80,12 @@ class Oracle(Adapter):
     notes = "exact line of sight on the bilinear model (the conformance oracle itself)"
 
     def run(self, job):
-        from . import oracle
-        return oracle.viewshed(job.dem, job.gt, job.observer, job.observer_height,
-                               job.target_height, job.max_distance, **job.curve_kwargs())[0]
+        # bit-identical to oracle.py (tests/test_oracle_fast.py), only faster
+        from . import oracle_fast
+        fast = oracle_fast.fastest()
+        kw = {"clearance": False} if fast.__name__.endswith("oracle_numba") else {}
+        return fast.viewshed(job.dem, job.gt, job.observer, job.observer_height,
+                             job.target_height, job.max_distance, **job.curve_kwargs(), **kw)[0]
 
 
 class OracleRviewshed(Adapter):

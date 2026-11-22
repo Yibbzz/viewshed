@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import datasets, oracle, oracle_rviewshed, scenes
+from . import datasets, oracle, oracle_fast, oracle_rviewshed, scenes
 from .adapters import Job, all_adapters
 from .metrics import BANDS, compare
 
@@ -24,13 +24,15 @@ def cached_oracle(job):
     h.update(oracle.VERSION.encode())
     h.update(np.ascontiguousarray(job.dem, float).tobytes())
     h.update(json.dumps([list(job.gt), list(job.observer), job.observer_height,
-                         job.target_height, job.max_distance]).encode())
+                         job.target_height, job.max_distance, job.curve_kwargs()]).encode())
     f = CACHE / f"oracle-{h.hexdigest()[:24]}.npz"
     if f.exists():
         d = np.load(f)
         return d["visible"], d["clearance"], int(d["n_exact"])
-    vis, clr, n_exact = oracle.viewshed(job.dem, job.gt, job.observer, job.observer_height,
-                                        job.target_height, job.max_distance)
+    # oracle_fast.fastest() is bit-identical to oracle.py (tests/test_oracle_fast.py)
+    vis, clr, n_exact = oracle_fast.fastest().viewshed(
+        job.dem, job.gt, job.observer, job.observer_height, job.target_height,
+        job.max_distance, **job.curve_kwargs())
     CACHE.mkdir(exist_ok=True)
     np.savez_compressed(f, visible=vis, clearance=clr, n_exact=n_exact)
     return vis, clr, n_exact
