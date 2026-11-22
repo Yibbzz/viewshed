@@ -117,7 +117,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --release -p viewshed
-      - run: cargo publish -p viewshed
+      - name: Skip versions already on crates.io
+        # crates.io never accepts a version twice; a tag whose crate version is
+        # already published (the Python package moved on alone) skips the upload
+        id: published
+        run: |
+          v=$(cargo metadata --no-deps --format-version 1 \
+                | jq -r '.packages[] | select(.name == "viewshed") | .version')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A 'viewshed-release-check' \
+                   "https://crates.io/api/v1/crates/viewshed/$v")
+          case "$code" in
+            200) echo "already=true" >> "$GITHUB_OUTPUT"
+                 echo "::notice::viewshed $v is already on crates.io; not publishing" ;;
+            404) echo "already=false" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "::error::crates.io answered $code for viewshed $v"; exit 1 ;;
+          esac
+      - if: steps.published.outputs.already != 'true'
+        run: cargo test --release -p viewshed
+      - if: steps.published.outputs.already != 'true'
+        run: cargo publish -p viewshed
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
