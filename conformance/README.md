@@ -56,9 +56,13 @@ smooth mathematical surface, and both are compared with true visibility on it
     segment below -tol, generate boundaries as a stream so skips cost nothing, and
     try the previous cell's blocker first. 1001 x 1001 in 0.2-0.6 s, against about
     11 s for the full numba pass and an estimated hour for `oracle.py`.
-  - The exact fallback reads the raster lazily (`oracle_fast.blocked_exact`):
-    `oracle.py` converts the whole raster to `Fraction`s per call, 1.8 s at
-    1001 x 1001.
+  - The exact fallback checks only the patches that can decide the tie: those
+    whose float minimum is within 1000 x tol of 0, plus their neighbours, each on
+    exactly the segment `oracle.py` uses (entry to exit crossing). `oracle.py`
+    trusts the float minimum beyond tol; this trusts it only beyond 1000 x tol, a
+    weaker version of the same assumption. It reads the raster lazily too
+    (`oracle.py` converts all of it to `Fraction`s per call: 1.8 s at 1001 x 1001).
+    Tie-heavy 301 x 301 rasters: 94 min -> 93 s for 57 of them.
 - **`oracle_rviewshed.py`, the r.viewshed model.** What GRASS `r.viewshed`
   actually computes, written from a description of the method (not GRASS's GPL
   code): each closer cell is reduced to three gradient samples (the two corners
@@ -119,8 +123,9 @@ many cells). The d²/(2R) drop is within 1 mm of a true sphere out to 35 km.
 - Faster clearance: the full numba pass still walks every segment, because the
   exact minimum gap rules out bounding against fixed thresholds (best-first
   branch and bound may help).
-- A faster exact fallback: tie-heavy rasters (integer heights, plateaus) send
-  thousands of cells to `Fraction` arithmetic, which dominates there.
+- A rigorous float filter: tol (1e-9 of scale) is an engineering margin, not a
+  proven bound on the rounding error. A running error bound per segment would
+  make both filters provable.
 
 `tests/test_rust_sweep.py` requires the Rust sweep to equal `oracle_rviewshed`
 on every cell of every dataset, scene and 40 random rasters (no-data, integer

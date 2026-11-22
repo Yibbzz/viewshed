@@ -16,7 +16,7 @@ import numpy as np
 from numba import njit, prange
 
 from . import oracle
-from .oracle_fast import blocked_exact
+from .oracle_fast import WINDOW, blocked_exact_patches
 
 VERSION = oracle.VERSION
 
@@ -466,6 +466,41 @@ def _decide_pass(z, ue, ve, ze, th, drop, res, cells, out, pyr, offs, shapes, to
         out[i] = state
 
 
+@njit(cache=True)
+def _near_zero(z, ue, ve, ze, th, drop, res, r, c, window, out):
+    """oracle_fast.near_zero_patches without the neighbours: (r0, c0) of every float
+    segment of cell (r, c) whose minimum is within `window` of 0. Returns the count."""
+    rows, cols = z.shape
+    U = np.empty(cols + 4)
+    V = np.empty(rows + 4)
+    ts = np.empty(rows + cols + 8)
+    du = c - ue
+    dv = r - ve
+    bend = drop * (du * du + dv * dv) * res * res
+    dz = z[r, c] - bend + th - ze
+    k = _merge(ts, U, _crossings_sorted(U, ue, du), V, _crossings_sorted(V, ve, dv))
+    n = 0
+    for j in range(k - 1):
+        ta = ts[j]
+        tb = ts[j + 1]
+        m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, j == k - 2, bend)
+        if not math.isnan(m) and m <= window:
+            mid = (ta + tb) / 2
+            out[n, 0] = math.floor(ve + mid * dv)
+            out[n, 1] = math.floor(ue + mid * du)
+            n += 1
+    return n
+
+
+def _exact(z, transform, x, y, ground, oh, ue, ve, ze, th, drop, res, tol, r, c):
+    """oracle_fast's candidate-patch exact check, candidates found in compiled code."""
+    buf = np.empty((z.shape[0] + z.shape[1] + 8, 2), np.int64)
+    n = _near_zero(z, ue, ve, ze, th, drop, res, r, c, WINDOW * tol, buf)
+    patches = sorted({(int(a) + i, int(b) + j) for a, b in buf[:n] for i in (-1, 0, 1)
+                      for j in (-1, 0, 1)})
+    return blocked_exact_patches(z, transform, x, y, ground, oh, r, c, th, drop, patches)
+
+
 def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
              max_distance=None, curvature=False, refraction=0.13, earth_radius=6371008.8,
              prune=True, clearance=True):
@@ -510,8 +545,8 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
         blocked = state == 1
         unsure = np.nonzero(state == 2)[0]
         for k in unsure:
-            blocked[k] = blocked_exact(z, transform, x, y, ground, observer_height,
-                                               int(rr[k]), int(cc[k]), target_height, drop)
+            blocked[k] = _exact(z, transform, x, y, ground, observer_height, ue, ve, ze,
+                                float(target_height), drop, res, tol, int(rr[k]), int(cc[k]))
         visible = np.zeros(z.shape, dtype=bool)
         visible[rr, cc] = ~blocked
         return visible, None, len(unsure)
@@ -529,8 +564,8 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
     blocked = mn < -tol
     unsure = np.nonzero(~(mn < -tol) & ~(mn > tol))[0]
     for k in unsure:
-        blocked[k] = blocked_exact(z, transform, x, y, ground, observer_height,
-                                           int(rr[k]), int(cc[k]), target_height, drop)
+        blocked[k] = _exact(z, transform, x, y, ground, observer_height, ue, ve, ze,
+                                float(target_height), drop, res, tol, int(rr[k]), int(cc[k]))
     visible[rr, cc] = ~blocked
     clearance[rr, cc] = far
     return visible, clearance, len(unsure)

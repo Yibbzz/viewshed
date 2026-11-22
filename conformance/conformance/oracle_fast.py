@@ -57,6 +57,79 @@ def blocked_exact(z, transform, x, y, ground, oh, r, c, th, drop=0.0):
     return False
 
 
+# Exact check on candidate patches only ------------------------------------------
+#
+# oracle._blocked_exact re-runs the whole sightline in Fraction arithmetic. But a
+# cell only reaches it when its float minimum is within tol of 0, and the patches
+# that can decide it are the ones whose float minimum is near 0 too: elsewhere the
+# float minimum is far from 0 and its error is many orders of magnitude smaller.
+# oracle.py already trusts the float minimum whenever it is beyond tol; here it is
+# trusted only beyond WINDOW * tol, and each candidate's 8 neighbours are checked
+# too (a float segment's patch comes from its midpoint and can be one off on a
+# sliver). The candidates are then checked exactly, on exactly the segment
+# oracle.py would use: inside a patch there are no other boundaries, so the segment
+# runs from the entry to the exit crossing (or 0 / 1), with no list to sort.
+
+WINDOW = 1000
+
+
+def _exact_setup(z, transform, x, y, ground, oh, r, c, th, drop):
+    F = Fraction
+    ue = (F(x) - F(transform[0])) / F(transform[1]) - F(1, 2)
+    ve = (F(y) - F(transform[3])) / F(transform[5]) - F(1, 2)
+    ze = ground + F(oh)
+    du, dv = F(c) - ue, F(r) - ve
+    res = abs(F(transform[1]))
+    bend = F(drop) * (du * du + dv * dv) * res * res
+    dz = F(z[r, c]) - bend + F(th) - ze
+    return ue, ve, ze, du, dv, dz, bend
+
+
+def _exact_patch_segment(ue, ve, du, dv, r0, c0):
+    """oracle.py's (exact) segment of the sightline inside patch (r0, c0), or None."""
+    ta, tb = Fraction(0), Fraction(1)
+    for p0, d, k0 in ((ue, du, c0), (ve, dv, r0)):
+        if d == 0:
+            if not (k0 <= p0 < k0 + 1):            # floor(p0) is the only patch
+                return None
+            continue
+        a, b = (k0 - p0) / d, (k0 + 1 - p0) / d
+        ta, tb = max(ta, min(a, b)), min(tb, max(a, b))
+    return (ta, tb) if ta < tb else None
+
+
+def blocked_exact_patches(z, transform, x, y, ground, oh, r, c, th, drop, patches):
+    """oracle._blocked_exact, restricted to the given patches (r0, c0)."""
+    ue, ve, ze, du, dv, dz, bend = _exact_setup(z, transform, x, y, ground, oh, r, c, th, drop)
+    zf = _LazyFractions(z)
+    for r0, c0 in patches:
+        seg = _exact_patch_segment(ue, ve, du, dv, r0, c0)
+        if seg is None:
+            continue
+        m = oracle._segment_min(zf, ue, ve, ze, du, dv, dz, seg[0], seg[1], bend=bend)
+        if m is not None and m < 0:
+            return True
+    return False
+
+
+def near_zero_patches(z, ue, ve, ze, th, drop, res, r, c, window):
+    """Patches (with their 8 neighbours) where the float pass's minimum for cell
+    (r, c) is within `window` of 0: oracle.py's float loop, in Python."""
+    du, dv = c - ue, r - ve
+    bend = drop * (du * du + dv * dv) * res * res
+    dz = z[r, c] - bend + th - ze
+    ts = sorted({0.0, 1.0, *oracle._crossings(ue, du), *oracle._crossings(ve, dv)})
+    out = set()
+    for i, (ta, tb) in enumerate(zip(ts, ts[1:])):
+        last = th if i == len(ts) - 2 else None
+        m = oracle._segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last, bend)
+        if m is not None and m <= window:
+            mid = (ta + tb) / 2
+            r0, c0 = math.floor(ve + mid * dv), math.floor(ue + mid * du)
+            out.update((r0 + a, c0 + b) for a in (-1, 0, 1) for b in (-1, 0, 1))
+    return sorted(out)
+
+
 def _crossings(p0, d):
     """oracle._crossings for many sightlines: (n, k) array of t, +inf padded.
     lo, hi and (k - p0) / d are computed exactly as there."""
@@ -200,8 +273,10 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
     blocked = mn < -tol
     unsure = np.nonzero(~(mn < -tol) & ~(mn > tol))[0]
     for k in unsure:
-        blocked[k] = blocked_exact(z, transform, x, y, ground, observer_height,
-                                           int(rr[k]), int(cc[k]), target_height, drop)
+        r, c = int(rr[k]), int(cc[k])
+        patches = near_zero_patches(z, ue, ve, ze, target_height, drop, res, r, c, WINDOW * tol)
+        blocked[k] = blocked_exact_patches(z, transform, x, y, ground, observer_height,
+                                           r, c, target_height, drop, patches)
     visible[rr, cc] = ~blocked
     clearance[rr, cc] = far
     return visible, clearance, len(unsure)
