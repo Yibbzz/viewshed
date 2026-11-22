@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .adapters import REPO, Rust
+from .adapters import EXE, REPO, Rust
 
-BIN = REPO / "target/release/examples/raw_ztv"
+BIN = REPO / f"target/release/examples/raw_ztv{EXE}"
 
 
 RELIEF = 1.0   # scales the hills (not the ridge); set by --relief

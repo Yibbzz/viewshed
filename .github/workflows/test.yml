@@ -23,28 +23,36 @@ jobs:
 
   python:
     # Builds the package and runs its tests plus the conformance suite (oracles,
-    # analytic scenes, sweep and bindings cell for cell). GRASS and GDAL tests are
-    # skipped where those aren't installed; the pinned Docker image (planned) runs them.
+    # analytic scenes, golden outputs, sweep and bindings cell for cell). GRASS and
+    # GDAL tests are skipped where those aren't installed. uv supplies each Python,
+    # including 3.9 (the oldest the abi3 wheel supports), which the runners no
+    # longer ship.
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python: ["3.9", "3.13"]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
       - name: Build and install
         working-directory: python
         run: |
-          python -m venv .venv
-          ${{ runner.os == 'Windows' && '.venv\Scripts\python' || '.venv/bin/python' }} -m pip install maturin pytest numpy
-          ${{ runner.os == 'Windows' && '.venv\Scripts\maturin' || '.venv/bin/maturin' }} develop --release
+          uv venv --python ${{ matrix.python }} .venv
+          PY=$([ "$RUNNER_OS" = Windows ] && echo .venv/Scripts/python || echo .venv/bin/python)
+          uv pip install --python "$PY" maturin pytest numpy
+          VIRTUAL_ENV=$PWD/.venv "$PY" -m maturin develop --release
+          echo "PY=$PWD/$PY" >> "$GITHUB_ENV"
       - name: Package tests
         working-directory: python
-        run: ${{ runner.os == 'Windows' && '.venv\Scripts\python' || '.venv/bin/python' }} -m pytest -q tests
+        run: '"$PY" -m pytest -q tests'
       - name: Conformance tests
         working-directory: conformance
-        run: ${{ runner.os == 'Windows' && '..\python\.venv\Scripts\python' || '../python/.venv/bin/python' }} -m pytest -q tests
+        env:
+          CONFORMANCE_STRICT: "1"
+        run: '"$PY" -m pytest -q -rs tests'

@@ -18,6 +18,11 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
+EXE = ".exe" if os.name == "nt" else ""
+# With CONFORMANCE_STRICT=1 (set in CI), the crate and the Python bindings must be
+# available: their tests fail instead of being skipped, so a broken build can't
+# make the suite pass by checking nothing.
+STRICT = os.environ.get("CONFORMANCE_STRICT") == "1"
 NODATA = -9999.0
 
 
@@ -111,6 +116,8 @@ class PythonBindings(Adapter):
             _import_viewshed()
             return True
         except ImportError:
+            if STRICT:
+                raise
             return False
 
     def run(self, job):
@@ -141,15 +148,23 @@ class Rust(Adapter):
     def available(self):
         if Rust._bin is not None:
             return True
-        cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
-        if not Path(cargo).exists():
-            return False
-        r = subprocess.run([cargo, "build", "--release", "-q", "--example", "raw_viewshed"],
-                           cwd=REPO, capture_output=True)
-        b = REPO / "target/release/examples/raw_viewshed"
-        if r.returncode == 0 and b.exists():
-            Rust._bin = b
-        return Rust._bin is not None
+        # rustup's cargo first (it honours rust-toolchain.toml); a distribution's
+        # cargo on PATH may be too old for the crate's minimum Rust version.
+        candidates = [Path.home() / f".cargo/bin/cargo{EXE}", shutil.which("cargo")]
+        errors = []
+        for cargo in dict.fromkeys(str(c) for c in candidates if c):
+            if not Path(cargo).exists():
+                continue
+            r = subprocess.run([cargo, "build", "--release", "-q", "--examples"],
+                               cwd=REPO, capture_output=True, text=True)
+            b = REPO / f"target/release/examples/raw_viewshed{EXE}"
+            if r.returncode == 0 and b.exists():
+                Rust._bin = b
+                return True
+            errors.append(f"{cargo}: {r.stderr.strip()[-2000:]}")
+        if STRICT:
+            raise RuntimeError("cannot build the Rust examples:\n" + "\n".join(errors or ["no cargo"]))
+        return False
 
     def run(self, j):
         with tempfile.TemporaryDirectory() as d:
