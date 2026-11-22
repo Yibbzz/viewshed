@@ -5,8 +5,9 @@ Surface model: heights at cell centres, bilinearly interpolated between them
 the surface at the observer point. A cell is visible when the straight line
 from the eye to the point `target_height` above the cell centre stays on or
 above the surface, sampled every quarter cell. NaN cells never block a view
-and are never visible. Flat earth only. This matches the Rust crate's
-`Surface::Bilinear` with curvature off.
+and are never visible. Flat earth only. The Rust crate's `Surface::Bilinear`
+computes the same model exactly; sampling, this one can differ from it on
+sightlines that graze the surface between samples.
 
 Use `viewshed.viewshed` for real work: it is exact, much faster, and supports
 curvature and refraction.

@@ -61,9 +61,27 @@ class Raster:
         ue_x = (F(x) - F(transform[0])) / F(transform[1]) - F(1, 2)
         ve_x = (F(y) - F(transform[3])) / F(transform[5]) - F(1, 2)
         ze_x = ground + F(oh)
+        self.ue_x, self.ve_x = ue_x, ve_x
         self.e_ue = _up(abs(F(ue) - ue_x))
         self.e_ve = _up(abs(F(ve) - ve_x))
         self.e_ze = _up(abs(F(ze) - ze_x))
+
+
+def within(raster, ue, ve, res, r, c, max_distance):
+    """Whether cell (r, c) is within max_distance of the observer, decided exactly:
+    (du^2 + dv^2) res^2 <= max^2 for the exact du, dv. Floats decide when the float
+    distance is clear of max by more than twice a bound on its error; otherwise
+    Fractions. The Rust crate's bilinear `within` is the same rule."""
+    du, dv = c - ue, r - ve
+    d = math.sqrt(du * du + dv * dv) * res
+    err = res * (raster.e_ue + raster.e_ve + U * (abs(du) + abs(dv))) + 8 * U * d
+    if d < max_distance - 2 * err:
+        return True
+    if d > max_distance + 2 * err:
+        return False
+    F = Fraction
+    dux, dvx = c - raster.ue_x, r - raster.ve_x
+    return (dux * dux + dvx * dvx) * F(res) * F(res) <= F(max_distance) ** 2
 
 
 def raster_slope(z):

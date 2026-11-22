@@ -15,7 +15,7 @@ cell closer than a target is reduced to three height samples (its centre and
 the two corners that bound it as seen from the observer, each corner
 averaged from the four cells meeting there), and a target is hidden when a
 closer cell's gradient, interpolated by angle in the target's direction, is
-steeper. `surface="bilinear"` is the slower bilinear reference instead.
+steeper. `surface="bilinear"` is exact line of sight on the bilinear surface instead.
 
 Earth curvature and refraction are on by default: every point is lowered by
 d^2 / (2 R) * (1 - refraction) at horizontal distance d, as in GRASS
@@ -73,7 +73,7 @@ def viewshed(dem, transform, observer, observer_height=1.6, target_height=0.0,
     target_height: height above each cell's surface that has to be visible.
     max_distance: cells farther than this are not visible (None = no limit).
     curvature, refraction, earth_radius: earth curvature correction (see module docs).
-    surface: "rviewshed" (default, matches GRASS) or "bilinear" (slow reference).
+    surface: "rviewshed" (default, matches GRASS) or "bilinear" (exact bilinear line of sight).
     """
     _heights(("observer_height", observer_height), ("target_height", target_height))
     x, y = (float(v) for v in observer)

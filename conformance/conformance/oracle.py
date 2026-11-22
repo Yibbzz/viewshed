@@ -144,7 +144,8 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
                 continue
             du, dv = c - ue, r - ve
             L = math.hypot(du, dv)
-            if max_distance is not None and L * res > max_distance:
+            if max_distance is not None and not certify.within(raster, ue, ve, res, r, c,
+                                                               max_distance):
                 continue
             cell = certify.make_cell(ue, ve, ze, raster.e_ue, raster.e_ve, raster.e_ze,
                                      target_height, drop, res, z[r, c], r, c)

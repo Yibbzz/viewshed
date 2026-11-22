@@ -12,8 +12,9 @@
 //! cell's gradient, interpolated in angle at the target's direction, is
 //! strictly steeper. The result matches GRASS 8.4 cell for cell.
 //!
-//! [`Surface::Bilinear`] is the slow 0.0.1 reference: bilinear surface between
-//! cell centres, observer at the exact point, sightline sampled every quarter cell.
+//! [`Surface::Bilinear`] is exact line of sight on the bilinear surface between
+//! cell centres, observer at its exact point: every float segment certified by
+//! rigorous rounding-error bounds, ties settled in exact rational arithmetic.
 //!
 //! No-data cells (NaN) never block a view and are never visible.
 //!
@@ -29,6 +30,7 @@
 
 use std::fmt;
 
+mod bilinear;
 mod sweep;
 mod ztv;
 
@@ -38,7 +40,11 @@ pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// The height array length doesn't equal rows × cols.
-    ShapeMismatch { len: usize, rows: usize, cols: usize },
+    ShapeMismatch {
+        len: usize,
+        rows: usize,
+        cols: usize,
+    },
     /// Rotated rasters (non-zero rotation terms) aren't supported.
     Rotated,
     /// Cells must be square and the cell size non-zero.
@@ -61,7 +67,10 @@ impl fmt::Display for Error {
             Error::NonSquareCells => write!(f, "cells must be square with a non-zero size"),
             Error::ObserverOutside => write!(f, "the observer is outside the raster"),
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
-            Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
+            Error::TooLarge => write!(
+                f,
+                "the area searched is over 1,000,000 cells across; set max_distance"
+            ),
         }
     }
 }
@@ -81,7 +90,11 @@ pub struct Grid<'a> {
 impl<'a> Grid<'a> {
     pub fn new(z: &'a [f64], rows: usize, cols: usize, transform: [f64; 6]) -> Result<Self, Error> {
         if z.len() != rows * cols {
-            return Err(Error::ShapeMismatch { len: z.len(), rows, cols });
+            return Err(Error::ShapeMismatch {
+                len: z.len(),
+                rows,
+                cols,
+            });
         }
         if transform[2] != 0.0 || transform[4] != 0.0 {
             return Err(Error::Rotated);
@@ -90,7 +103,12 @@ impl<'a> Grid<'a> {
         if w == 0.0 || (w - h).abs() > 1e-9 * w {
             return Err(Error::NonSquareCells);
         }
-        Ok(Grid { z, rows, cols, transform })
+        Ok(Grid {
+            z,
+            rows,
+            cols,
+            transform,
+        })
     }
 
     fn res(&self) -> f64 {
@@ -148,8 +166,10 @@ pub enum Surface {
     /// centre of its cell. Computed by a radial sweep in O(n log n).
     #[default]
     RViewshed,
-    /// Bilinear surface between cell centres, observer at the exact point.
-    /// Slow reference: each cell's sightline is sampled every quarter cell.
+    /// Bilinear surface between cell centres, observer at its exact point. Exact:
+    /// each sightline is split at the patch boundaries, every segment's minimum gap
+    /// is certified from rigorous rounding-error bounds, and anything undecided is
+    /// settled in exact rational arithmetic. `max_distance` is compared exactly too.
     Bilinear,
 }
 
@@ -235,39 +255,8 @@ fn line_of_sight_curved(grid: &Grid, eye: [f64; 3], target: [f64; 3], drop: f64)
 pub fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
     match opts.surface {
         Surface::RViewshed => sweep::viewshed(grid, x, y, opts),
-        Surface::Bilinear => bilinear_viewshed(grid, x, y, opts),
+        Surface::Bilinear => bilinear::viewshed(grid, x, y, opts),
     }
-}
-
-fn bilinear_viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
-    if !grid.inside(x, y) {
-        return Err(Error::ObserverOutside);
-    }
-    let ground = grid.height(x, y);
-    if ground.is_nan() {
-        return Err(Error::ObserverOnNoData);
-    }
-    let eye = [x, y, ground + opts.observer_height];
-    let drop = opts.drop_factor();
-    let mut out = vec![false; grid.rows * grid.cols];
-    for r in 0..grid.rows {
-        for c in 0..grid.cols {
-            let z = grid.at(r, c);
-            if z.is_nan() {
-                continue;
-            }
-            let (cx, cy) = grid.centre(r, c);
-            let d2 = (cx - x).powi(2) + (cy - y).powi(2);
-            if let Some(max) = opts.max_distance {
-                if d2.sqrt() > max {
-                    continue;
-                }
-            }
-            let tz = z - d2 * drop + opts.target_height;
-            out[r * grid.cols + c] = line_of_sight_curved(grid, eye, [cx, cy, tz], drop);
-        }
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -284,7 +273,10 @@ mod tests {
     fn flat_ground_is_all_visible() {
         let z = flat(50.0);
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        assert!(viewshed(&g, 20.5, 20.5, &Options::default()).unwrap().iter().all(|&v| v));
+        assert!(viewshed(&g, 20.5, 20.5, &Options::default())
+            .unwrap()
+            .iter()
+            .all(|&v| v));
     }
 
     #[test]
@@ -308,7 +300,10 @@ mod tests {
             z[15 * 41 + c] = 5.0;
         }
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        let opts = Options { observer_height: 50.0, ..Options::default() };
+        let opts = Options {
+            observer_height: 50.0,
+            ..Options::default()
+        };
         assert!(viewshed(&g, 20.5, 20.5, &opts).unwrap()[5 * 41 + 20]);
     }
 
@@ -317,7 +312,10 @@ mod tests {
         let mut z = flat(0.0);
         z[0] = f64::NAN;
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        let opts = Options { max_distance: Some(10.0), ..Options::default() };
+        let opts = Options {
+            max_distance: Some(10.0),
+            ..Options::default()
+        };
         let seen = viewshed(&g, 20.5, 20.5, &opts).unwrap();
         assert!(seen[20 * 41 + 25]);
         assert!(!seen[20 * 41 + 35]);
@@ -332,21 +330,46 @@ mod tests {
         let (h, k) = (1.6, 0.13);
         let r = (1.0 - k) * 10.5 * 10.5 / (2.0 * h);
         for surface in [Surface::RViewshed, Surface::Bilinear] {
-            let opts = Options { observer_height: h, refraction: k, earth_radius: r, surface, ..Options::default() };
+            let opts = Options {
+                observer_height: h,
+                refraction: k,
+                earth_radius: r,
+                surface,
+                ..Options::default()
+            };
             let seen = viewshed(&g, 20.5, 20.5, &opts).unwrap();
             assert!(seen[20 * 41 + 20 + 9], "{surface:?}: within the horizon");
             assert!(!seen[20 * 41 + 20 + 12], "{surface:?}: beyond the horizon");
-            let flat_earth = Options { curvature: false, ..opts };
-            assert!(viewshed(&g, 20.5, 20.5, &flat_earth).unwrap().iter().all(|&v| v));
+            let flat_earth = Options {
+                curvature: false,
+                ..opts
+            };
+            assert!(viewshed(&g, 20.5, 20.5, &flat_earth)
+                .unwrap()
+                .iter()
+                .all(|&v| v));
         }
     }
 
     #[test]
     fn bad_input_is_an_error() {
         let z = flat(0.0);
-        assert_eq!(Grid::new(&z, 40, 41, GT).unwrap_err(), Error::ShapeMismatch { len: 1681, rows: 40, cols: 41 });
-        assert_eq!(Grid::new(&z, 41, 41, [0.0, 1.0, 0.1, 41.0, 0.0, -1.0]).unwrap_err(), Error::Rotated);
+        assert_eq!(
+            Grid::new(&z, 40, 41, GT).unwrap_err(),
+            Error::ShapeMismatch {
+                len: 1681,
+                rows: 40,
+                cols: 41
+            }
+        );
+        assert_eq!(
+            Grid::new(&z, 41, 41, [0.0, 1.0, 0.1, 41.0, 0.0, -1.0]).unwrap_err(),
+            Error::Rotated
+        );
         let g = Grid::new(&z, 41, 41, GT).unwrap();
-        assert_eq!(viewshed(&g, 100.0, 0.0, &Options::default()).unwrap_err(), Error::ObserverOutside);
+        assert_eq!(
+            viewshed(&g, 100.0, 0.0, &Options::default()).unwrap_err(),
+            Error::ObserverOutside
+        );
     }
 }

@@ -133,6 +133,11 @@ many cells). The d²/(2R) drop is within 1 mm of a true sphere out to 35 km.
   on a grid line, whose exact twin may sit 1e-16 to either side, is left
   undecided; certifying both neighbouring patches would settle it.
 
+`tests/test_rust_bilinear.py` requires the crate's exact bilinear mode to equal
+the bilinear oracle on every cell of every dataset, scene and 40 random rasters
+(no-data, integer ties, distance limits, observers on corners, 0.3 m cells,
+offset origins, curvature with tiny earth radii).
+
 `tests/test_rust_sweep.py` requires the Rust sweep to equal `oracle_rviewshed`
 on every cell of every dataset, scene and 40 random rasters (no-data, integer
 heights with many exact ties, distance limits).

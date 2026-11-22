@@ -55,11 +55,16 @@ pub(crate) struct Cell {
     pub(crate) slope: [f64; 3], // dz / distance at ENTER, centre, EXIT
     pub(crate) dr: i32,         // offset from the observer cell, rows (south +)
     pub(crate) dc: i32,         // and columns
-    pub(crate) ring: u32,       // floor of the distance in cells; u32::MAX = no cell (no data or out of range)
+    pub(crate) ring: u32, // floor of the distance in cells; u32::MAX = no cell (no data or out of range)
 }
 
 impl Cell {
-    pub(crate) const NONE: Cell = Cell { slope: [0.0; 3], dr: 0, dc: 0, ring: u32::MAX };
+    pub(crate) const NONE: Cell = Cell {
+        slope: [0.0; 3],
+        dr: 0,
+        dc: 0,
+        ring: u32::MAX,
+    };
 
     pub(crate) fn key(&self) -> i64 {
         let (dr, dc) = (self.dr as i64, self.dc as i64);
@@ -251,7 +256,10 @@ impl RingTree {
         self.lo[k] = lo;
         while k > 1 {
             k /= 2;
-            let (hi, lo) = (self.hi[2 * k].max(self.hi[2 * k + 1]), self.lo[2 * k].max(self.lo[2 * k + 1]));
+            let (hi, lo) = (
+                self.hi[2 * k].max(self.hi[2 * k + 1]),
+                self.lo[2 * k].max(self.lo[2 * k + 1]),
+            );
             if hi == self.hi[k] && lo == self.lo[k] {
                 break; // nothing above changes
             }
@@ -278,7 +286,10 @@ impl RingTree {
                 return true;
             }
             if r - l == 1 {
-                if self.members[l].iter().any(|&c| t.blocked_by(&cells[c as usize])) {
+                if self.members[l]
+                    .iter()
+                    .any(|&c| t.blocked_by(&cells[c as usize]))
+                {
                     return true;
                 }
                 continue;
@@ -286,14 +297,20 @@ impl RingTree {
             // Visit the child with the steeper bound first: it holds the likely horizon.
             let mid = (l + r) / 2;
             let (a, b) = ((2 * node, l, mid), (2 * node + 1, mid, r));
-            let (first, second) = if self.hi[2 * node] >= self.hi[2 * node + 1] { (a, b) } else { (b, a) };
+            let (first, second) = if self.hi[2 * node] >= self.hi[2 * node + 1] {
+                (a, b)
+            } else {
+                (b, a)
+            };
             stack[top] = second;
             stack[top + 1] = first;
             top += 2;
         }
         // The target's own ring: only cells with a smaller squared distance.
         let key = t.key;
-        self.members[t.ring].iter().any(|&c| cells[c as usize].key() < key && t.blocked_by(&cells[c as usize]))
+        self.members[t.ring]
+            .iter()
+            .any(|&c| cells[c as usize].key() < key && t.blocked_by(&cells[c as usize]))
     }
 }
 
@@ -364,7 +381,9 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
         let p = 4.0 * k as f64 / n_sec as f64;
         (p.to_bits() & !3, p)
     };
-    let out: Vec<AtomicBool> = (0..grid.rows * grid.cols).map(|_| AtomicBool::new(false)).collect();
+    let out: Vec<AtomicBool> = (0..grid.rows * grid.cols)
+        .map(|_| AtomicBool::new(false))
+        .collect();
     let th = opts.target_height;
     (0..n_sec).into_par_iter().for_each(|k| {
         let ((bs, ps), (be, pe)) = (bound(k), bound(k + 1));
@@ -375,7 +394,9 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
         let mut events: Vec<Event> = Vec::new();
         let mut start: Vec<u32> = Vec::new();
         for r in r0..=r1 {
-            let Some((xlo, xhi)) = row_span(planes, -(r - rv) as f64) else { continue };
+            let Some((xlo, xhi)) = row_span(planes, -(r - rv) as f64) else {
+                continue;
+            };
             let lo = ((xlo - 1.5).floor() as i64 + cv).max(c0);
             let hi = ((xhi + 1.5).ceil() as i64 + cv).min(c1);
             for c in lo..=hi {
@@ -383,13 +404,25 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                 if cell.ring == u32::MAX {
                     continue;
                 }
-                let keys = [event_key(&cell, 2), event_key(&cell, 1), event_key(&cell, 0)];
+                let keys = [
+                    event_key(&cell, 2),
+                    event_key(&cell, 1),
+                    event_key(&cell, 0),
+                ];
                 let (enter, exit) = (keys[0], keys[2]);
                 // Cells straddling the start direction (east of V on its row) wrap.
-                let active = if enter > exit { bs <= exit || enter < bs } else { enter < bs && bs <= exit };
+                let active = if enter > exit {
+                    bs <= exit || enter < bs
+                } else {
+                    enter < bs && bs <= exit
+                };
                 let first = events.len();
                 let i = cells.len() as u32;
-                events.extend(keys.iter().filter(|&&key| bs <= key && key < be).map(|&key| Event { key, cell: i }));
+                events.extend(
+                    keys.iter()
+                        .filter(|&&key| bs <= key && key < be)
+                        .map(|&key| Event { key, cell: i }),
+                );
                 if active || events.len() > first {
                     cells.push(cell);
                     if active {
@@ -453,7 +486,12 @@ pub(crate) fn cell_at(grid: &Grid, rv: i64, cv: i64, eye: f64, drop: f64, r: i64
         ring += 1;
     }
     let [enter, exit] = corners(dr, dc);
-    let mut cell = Cell { slope: [0.0; 3], dr: dr as i32, dc: dc as i32, ring: ring as u32 };
+    let mut cell = Cell {
+        slope: [0.0; 3],
+        dr: dr as i32,
+        dc: dc as i32,
+        ring: ring as u32,
+    };
     cell.slope[1] = (zc - dist * dist * drop - eye) / dist;
     for (j, (oc, or)) in [(0usize, enter), (2, exit)] {
         let (pc, pr) = (2 * dc + oc, 2 * dr + or);

@@ -599,7 +599,8 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
     if clearance or max_distance is not None:
         L = np.array([math.hypot(a, b) for a, b in zip(du.tolist(), dv.tolist())])
     if max_distance is not None:
-        keep = ~(L * res > max_distance)
+        keep = np.array([certify.within(rx, ue, ve, res, r, c, max_distance)
+                         for r, c in zip(rr.tolist(), cc.tolist())], dtype=bool)
         rr, cc, L = rr[keep], cc[keep], L[keep]
     cells = np.stack([rr, cc], axis=1).astype(np.int64)
     state = np.empty(len(rr), np.int8)
