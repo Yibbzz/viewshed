@@ -1281,12 +1281,19 @@ fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], ta: f64, tb: 
     let (cth, sth) = (tm.cos(), tm.sin());
     let (mut d1lo, mut d1hi, mut d2lo, mut d2hi) =
         (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-    let mut angs = [ta, tb, tm, 0.0, 0.0, 0.0, 0.0];
+    // Entry and exit distances are piecewise 1/cos of the angle to an (axis-aligned)
+    // face normal: extreme at the interval's ends, where the face crossed changes (patch
+    // corner directions), or at a face's normal direction (an axis direction). All of
+    // those that fall inside the interval are evaluated, so the extremes are exact.
+    let mut angs = [0.0f64; 16];
+    angs[..3].copy_from_slice(&[ta, tb, tm]);
     let mut n = 3;
-    for &ca in corner_angles {
-        for wrap in [-2.0 * std::f64::consts::PI, 0.0, 2.0 * std::f64::consts::PI] {
-            if ta < ca + wrap && ca + wrap < tb && n < angs.len() {
-                angs[n] = ca + wrap;
+    let pi = std::f64::consts::PI;
+    let axes = [-pi, -0.5 * pi, 0.0, 0.5 * pi, pi];
+    for &a0 in corner_angles.iter().chain(axes.iter()) {
+        for wrap in [-2.0 * pi, 0.0, 2.0 * pi] {
+            if ta < a0 + wrap && a0 + wrap < tb && n < angs.len() {
+                angs[n] = a0 + wrap;
                 n += 1;
             }
         }
@@ -1334,29 +1341,46 @@ fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], ta: f64, tb: 
 /// one stretch and one closed-form evaluation, unless a patch corner falls inside the
 /// interval (then the full routine).
 fn ray_bounds(p: &Patch, s: &Setup, theta: f64, w: f64, covers: bool) -> (f64, f64) {
+    let (c, sn) = (theta.cos(), theta.sin());
+    // a patch corner or an axis direction inside the interval: the crossing distances
+    // may have an extreme inside it, so use the full routine (rare)
     for (a_, b_) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
         let (u, v) = (p.c0 + a_ - s.ue, p.r0 + b_ - s.ve);
-        // corner within the interval: its cross product with the ray is tiny
-        let (c, sn) = (theta.cos(), theta.sin());
         let cross = u * sn - v * c;
         if cross.abs() <= (u * u + v * v).sqrt() * (2.0 * w + 1e-12) && u * c + v * sn > 0.0 {
             return bin_bounds(p, s, theta - w, theta + w, covers);
         }
     }
-    let (cth, sth) = (theta.cos(), theta.sin());
-    let Some((d1, d2)) = stretch_d(s, p.r0, p.c0, cth, sth) else {
+    if c.abs() <= 2.0 * w + 1e-12 || sn.abs() <= 2.0 * w + 1e-12 {
+        return bin_bounds(p, s, theta - w, theta + w, covers);
+    }
+    // otherwise the crossing distances are monotone across the interval: its two ends
+    // give their exact ranges (however grazing the faces crossed)
+    let (cth, sth) = (c, sn);
+    let mut d1 = f64::INFINITY;
+    let mut d2 = f64::NEG_INFINITY;
+    let (mut d1hi, mut d2lo) = (f64::NEG_INFINITY, f64::INFINITY);
+    let mut hit = 0;
+    for t in [theta - w, theta, theta + w] {
+        if let Some((a, b)) = stretch_d(s, p.r0, p.c0, t.cos(), t.sin()) {
+            hit += 1;
+            d1 = d1.min(a);
+            d1hi = d1hi.max(a);
+            d2 = d2.max(b);
+            d2lo = d2lo.min(b);
+        }
+    }
+    if hit == 0 {
         return (f64::NEG_INFINITY, f64::NEG_INFINITY);
-    };
+    }
+    let covers = covers && hit == 3;
     let res = s.res;
     let e3 = (p.z00 - p.z01 - p.z10 + p.z11).abs();
     let g = (p.z01 - p.z00).abs().max((p.z11 - p.z10).abs())
         + (p.z10 - p.z00).abs().max((p.z11 - p.z01).abs())
         + 2.0 * e3;
     let e_pos = (s.e_ue + s.e_ve) * res;
-    // rays within w of theta cross the patch between d1 and d2 up to a shift of
-    // d tan(w) / sin(incidence); with no corner in the interval the faces crossed are
-    // the same, so a relative pad of 4 w (plus absolute) is generous at these widths
-    let pad = d2 * (4.0 * w.tan() + 1e-9) + 1e-9 * res + 2.0 * e_pos;
+    let pad = d2 * 1e-12 + 1e-9 * res + 2.0 * e_pos;
     let slack = g * w.tan() * (1.0 + REL_B) / res;
     let d_near = d1 - pad;
     let err_obs = if d_near > 0.0 { (g * (e_pos / res) + s.e_ze) / d_near } else { f64::INFINITY };
@@ -1364,7 +1388,8 @@ fn ray_bounds(p: &Patch, s: &Setup, theta: f64, w: f64, covers: bool) -> (f64, f
     let ub = ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack);
     let mut lb = f64::NEG_INFINITY;
     if covers {
-        let (a, b) = (d1 + pad, d2 - pad);
+        // distances every ray of the interval crosses inside the patch
+        let (a, b) = (d1hi + pad, d2lo - pad);
         if a < b {
             let (lb_v, size) = centre_max(p, s, cth, sth, a, b);
             lb = lb_v - slack - err_obs - REL_B * (size + lb_v.abs() + slack);
