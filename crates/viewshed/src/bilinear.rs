@@ -19,12 +19,15 @@
 //! segment is certified clear, so that is the exact answer.
 //!
 //! Two ways through the cells, both exact: row-major chunks (cheap sightlines;
-//! neighbours share blockers and caches), or rings of increasing distance with
-//! horizon filters that certify a sightline's middle stretch clear, or the whole
-//! target hidden, from an angular table of slope bounds (see `Horizon`). A sample of
-//! cells, walked first, picks one: the horizon pays when many sightlines run close to
-//! the terrain (hilltops, masts, open ground), 25-40% faster there on real LiDAR and
-//! Copernicus DEMs; elsewhere its setup costs more than it saves.
+//! neighbours share blockers and caches), or rings of increasing distance with a
+//! horizon of everything already passed (see `Bins`): per thin angular bin, a lower
+//! bound on the horizon and a short list of candidate patches, with analytic bounds
+//! from the closed form of a bilinear patch's horizon (sigma = alpha d + beta + gamma/d
+//! along a ray). A target is decided by its bin, or by its candidates at its own
+//! direction; the walk then only covers the stretches near the observer and the
+//! target, and any straddling candidate. A sample of cells, walked first, picks the
+//! mode: the horizon pays when many sightlines run close to the terrain (hilltops,
+//! masts, open ground).
 //!
 //! This follows the conformance suite's `certify.py` and `oracle_numba.py`, which
 //! hold the method to the plain exact oracle (`oracle.py`) cell for cell.
@@ -657,7 +660,7 @@ fn walk(
     r: i64,
     c: i64,
     failed: &mut [i64],
-    mid: Option<(f64, f64)>,
+    mid: &[(f64, f64)],
     count: &mut usize,
 ) -> (State, i64, i64) {
     let (ue, ve, du, dv, ze, dz, delta) = (
@@ -683,6 +686,7 @@ fn walk(
     // pyramid level to try first: one coarser after each skip, the finest after
     // each evaluated segment (max-mipmap traversal)
     let mut cur = nlev.saturating_sub(1);
+    let mut next_mid = 0usize;
     let mut ta = 0.0f64;
     let mut fa = near_observer_flag(cell) || peek(ui, vi, one) - ta <= lim || !delta.is_finite();
     let mut state = State::Clear;
@@ -715,10 +719,11 @@ fn walk(
         // a stretch the horizon certified clear (see Horizon), or else a block of
         // patches on which the exact gap is certainly > 0, is skipped
         let mut skip_to = -1.0f64;
-        if let Some((sa, sb)) = mid {
-            if ta >= sa && sb > tb {
-                skip_to = sb;
-            }
+        while next_mid < mid.len() && mid[next_mid].1 <= ta {
+            next_mid += 1;
+        }
+        if next_mid < mid.len() && ta >= mid[next_mid].0 && mid[next_mid].1 > tb {
+            skip_to = mid[next_mid].1;
         }
         if skip_to < 0.0 && delta.is_finite() {
             let mid = (ta + tb) / 2.0;
@@ -1072,92 +1077,6 @@ const HORIZON_AT: f64 = 3.4; // sampled segments per cell from which the horizon
 const RING: f64 = 4.0; // ring width in cells
 const REL: f64 = 1e-12;
 
-struct Horizon {
-    max: Vec<f64>,
-    /// Per sector, a lower bound on the slope of a point that every ray through the
-    /// sector crosses (from patches covering the whole sector and entirely inserted).
-    low: Vec<f64>,
-    scale: f64,
-}
-
-impl Horizon {
-    fn new(n: usize) -> Horizon {
-        let s = n.next_power_of_two();
-        Horizon {
-            max: vec![f64::NEG_INFINITY; s],
-            low: vec![f64::NEG_INFINITY; s],
-            scale: s as f64 / (2.0 * std::f64::consts::PI),
-        }
-    }
-
-    /// Record a patch whose angular span certainly contains [lo, hi] for the sectors
-    /// lying wholly inside it.
-    fn insert_low(&mut self, lo: f64, hi: f64, v: f64) {
-        let n = self.max.len() as i64;
-        let pi = std::f64::consts::PI;
-        // sector k covers [k / scale - pi, (k + 1) / scale - pi]; the shrink keeps the
-        // float sector edges inside the span
-        let a = ((lo + pi) * self.scale).ceil() as i64 + 1;
-        let b = ((hi + pi) * self.scale).floor() as i64 - 2;
-        let mut k = a;
-        while k <= b {
-            let i = k.rem_euclid(n) as usize;
-            if v > self.low[i] {
-                self.low[i] = v;
-            }
-            k += 1;
-        }
-    }
-
-    /// The least of the lower bounds over the sectors meeting [lo, hi]: the true
-    /// direction lies in one of them.
-    fn query_low(&self, lo: f64, hi: f64) -> f64 {
-        let n = self.max.len() as i64;
-        let (a, b) = self.range(lo, hi);
-        let mut m = f64::INFINITY;
-        let mut k = a;
-        while k <= b {
-            m = m.min(self.low[k.rem_euclid(n) as usize]);
-            k += 1;
-        }
-        m
-    }
-
-    fn sector(&self, theta: f64) -> i64 {
-        ((theta + std::f64::consts::PI) * self.scale).floor() as i64
-    }
-
-    /// Sectors meeting [lo, hi] (angles in radians, lo <= hi, span < pi), wrapping.
-    fn range(&self, lo: f64, hi: f64) -> (i64, i64) {
-        (self.sector(lo), self.sector(hi))
-    }
-
-    fn insert(&mut self, lo: f64, hi: f64, v: f64) {
-        let n = self.max.len() as i64;
-        let (a, b) = self.range(lo, hi);
-        let mut k = a;
-        while k <= b {
-            let i = k.rem_euclid(n) as usize;
-            if v > self.max[i] {
-                self.max[i] = v;
-            }
-            k += 1;
-        }
-    }
-
-    fn query(&self, lo: f64, hi: f64) -> f64 {
-        let n = self.max.len() as i64;
-        let (a, b) = self.range(lo, hi);
-        let mut m = f64::NEG_INFINITY;
-        let mut k = a;
-        while k <= b {
-            m = m.max(self.max[k.rem_euclid(n) as usize]);
-            k += 1;
-        }
-        m
-    }
-}
-
 /// A patch ready for the horizon: its nearest distance (a lower bound), its angular
 /// span (widened) and an upper bound on the slope of any of its points.
 struct HPatch {
@@ -1166,19 +1085,8 @@ struct HPatch {
     slope: f64,
     /// upper bound on the farthest distance, the span shrunk (certainly inside the
     /// true one), and a lower bound on the slope of any point of the patch
-    dmax: f64,
     lo_in: f64,
     hi_in: f64,
-    slope_low: f64,
-}
-
-/// Lower bound on (h - drop d^2 - ze*) / d over d in [dl, dh], h >= hmin.
-fn slope_lo(hmin: f64, ze_hi: f64, drop: f64, dl: f64, dh: f64) -> f64 {
-    let dd = if drop >= 0.0 { dh } else { dl };
-    let n = hmin - ze_hi - drop * dd * dd;
-    let n = n - REL * (hmin.abs() + ze_hi.abs() + (drop * dd * dd).abs());
-    let v = if n >= 0.0 { n / dh } else { n / dl };
-    v - REL * v.abs()
 }
 
 /// Upper bound on (h - drop d^2 - ze*) / d over d in [dl, dh], h <= hmax.
@@ -1226,15 +1134,12 @@ fn prepare_patch(grid: &Grid, s: &Setup, r0: i64, c0: i64, d0: f64) -> Option<HP
     let dmax = dmax * res * (1.0 + REL) + 2.0 * e_pos;
     let widen = 1e-9 + 8.0 * e_pos / dmin;
     let hmax = p.z00.max(p.z01).max(p.z10).max(p.z11);
-    let hmin = p.z00.min(p.z01).min(p.z10).min(p.z11);
     Some(HPatch {
         lo: centre + alo - widen,
         hi: centre + ahi + widen,
         slope: slope_hi(hmax, s.ze - s.e_ze, s.drop, dmin, dmax),
-        dmax,
         lo_in: centre + alo + widen,
         hi_in: centre + ahi - widen,
-        slope_low: slope_lo(hmin, s.ze + s.e_ze, s.drop, dmin, dmax),
     })
 }
 
@@ -1284,30 +1189,393 @@ fn target_slope(s: &Setup, cell: &Cell, zt: f64) -> Option<(f64, f64, f64, f64, 
     Some((lo, hi, theta, widen, dist))
 }
 
-/// The middle stretch of the sightline (in t) that the horizon certifies clear, given
-/// that every patch with nearest distance < `inserted` is in `h`.
-fn horizon_stretch(h: &Horizon, s: &Setup, ts: (f64, f64, f64, f64, f64), inserted: f64) -> Option<(f64, f64)> {
-    let (lo, _, theta, widen, dist) = ts;
+
+// --- horizon bins: analytic bounds and candidate lists ------------------------------
+//
+// Per angular bin: `low`, a lower bound on the horizon H(theta) of the inserted patches
+// for every theta in the bin, and the candidates: inserted patches whose upper bound
+// over the bin exceeds `low`. Invariant: every inserted patch meeting the bin is a
+// candidate or has H <= low there. Bounds over an angular interval come from
+// `bin_bounds` (closed form on the interval's centre ray plus a lateral slack), so a
+// target is decided by its bin's bounds, by its candidates' bounds at its own
+// direction, or (rarely) by the walk.
+
+const REL_B: f64 = 1e-10; // margin on closed-form values, relative to the size of their terms
+const CAND_CAP: usize = 48;
+
+/// max over d in [d1, d2] of the patch polynomial's sigma = alpha d + beta + gamma / d
+/// along (cth, sth), and a bound on the size of the terms that went into it.
+fn centre_max(p: &Patch, s: &Setup, cth: f64, sth: f64, d1: f64, d2: f64) -> (f64, f64) {
+    let (z00, z01, z10, z11) = (p.z00, p.z01, p.z10, p.z11);
     let res = s.res;
-    // t_a: beyond it every patch crossed is at least NEAR cells away; t_b: up to it
-    // every patch crossed has its nearest point before `inserted`
-    let t_a = (NEAR * res + 2.0 * res) / dist;
-    let t_b = (inserted - 0.5 * res) / dist;
-    if !(t_b > t_a + 0.01) {
-        return None;
+    let e3 = z00 - z01 - z10 + z11;
+    let (du0, dv0) = (s.ue - p.c0, s.ve - p.r0);
+    let bobs = z00 + (z01 - z00) * du0 + (z10 - z00) * dv0 + e3 * du0 * dv0;
+    let alpha = e3 * cth * sth / (res * res) - s.drop;
+    let beta = (((z01 - z00) + e3 * dv0) * cth + ((z10 - z00) + e3 * du0) * sth) / res;
+    let gamma = bobs - s.ze;
+    let d1 = d1.max(1e-300);
+    let v1 = alpha * d1 + beta + gamma / d1;
+    let v2 = alpha * d2 + beta + gamma / d2;
+    let mut best = v1.max(v2);
+    if alpha < 0.0 && gamma < 0.0 {
+        let ds = (gamma / alpha).sqrt();
+        if d1 < ds && ds < d2 {
+            best = best.max(beta - 2.0 * (alpha * gamma).sqrt());
+        }
     }
-    if lo > h.query(theta - widen, theta + widen) {
-        Some((t_a, t_b))
+    // the polynomial is expanded around the observer: far away its terms are large and
+    // cancel, so the rounding error scales with them, not with the result. Each term is
+    // a height difference times a distance (each subtraction's rounding is relative to
+    // its own result), so these are the magnitudes that matter, not the heights.
+    let (gu, gv) = ((z01 - z00).abs(), (z10 - z00).abs());
+    let e3a = e3.abs();
+    let (eu, ev) = (1.0 + du0.abs(), 1.0 + dv0.abs());
+    let size = (e3a / (res * res) + s.drop.abs()) * d2
+        + (gu + gv + e3a * (eu + ev)) / res
+        + (z00.abs() + s.ze.abs() + gu * eu + gv * ev + e3a * eu * ev) / d1;
+    (best, size)
+}
+
+/// Ray-square stretch (map units) of direction (cth, sth) in patch (r0, c0).
+fn stretch_d(s: &Setup, r0: f64, c0: f64, cth: f64, sth: f64) -> Option<(f64, f64)> {
+    let (mut d1, mut d2) = (0.0f64, f64::INFINITY);
+    for (p0, w, k0) in [(s.ue, cth, c0), (s.ve, sth, r0)] {
+        if w == 0.0 {
+            if !(k0 <= p0 && p0 <= k0 + 1.0) {
+                return None;
+            }
+            continue;
+        }
+        let a = (k0 - p0) * s.res / w;
+        let b = (k0 + 1.0 - p0) * s.res / w;
+        d1 = d1.max(a.min(b));
+        d2 = d2.min(a.max(b));
+    }
+    if d1 < d2 {
+        Some((d1, d2))
     } else {
         None
     }
 }
 
-/// Whether the horizon certifies the target hidden: some patch entirely nearer than
-/// the target, crossed by its ray, has every point above the sightline.
-fn horizon_hidden(h: &Horizon, ts: (f64, f64, f64, f64, f64)) -> bool {
-    let (_, hi, theta, widen, _) = ts;
-    h.query_low(theta - widen, theta + widen) > hi
+/// (lb, ub) on H_P(theta) for every theta in [ta, tb]; lb = -inf unless `covers` (the
+/// patch meets every ray of the interval). Every point of the patch inside the wedge is
+/// within lateral distance d tan(half) of the centre ray at the same distance d, so its
+/// sigma differs from the centre ray's by at most G tan(half) / res (G: gradient bound
+/// of the patch polynomial near the patch); curvature depends on d only. The observer's
+/// position and eye-height errors and rounding are covered by further margins.
+fn bin_bounds(p: &Patch, s: &Setup, ta: f64, tb: f64, covers: bool) -> (f64, f64) {
+    let mut ca = [0.0f64; 4];
+    for (i, (a_, b_)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+        ca[i] = (p.r0 + b_ - s.ve).atan2(p.c0 + a_ - s.ue);
+    }
+    bin_bounds_with(p, s, &ca, ta, tb, covers)
+}
+
+/// bin_bounds with the patch's corner directions already known.
+fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], ta: f64, tb: f64, mut covers: bool) -> (f64, f64) {
+    let res = s.res;
+    let tm = 0.5 * (ta + tb);
+    let half = 0.5 * (tb - ta);
+    let (cth, sth) = (tm.cos(), tm.sin());
+    let (mut d1lo, mut d1hi, mut d2lo, mut d2hi) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let mut angs = [ta, tb, tm, 0.0, 0.0, 0.0, 0.0];
+    let mut n = 3;
+    for &ca in corner_angles {
+        for wrap in [-2.0 * std::f64::consts::PI, 0.0, 2.0 * std::f64::consts::PI] {
+            if ta < ca + wrap && ca + wrap < tb && n < angs.len() {
+                angs[n] = ca + wrap;
+                n += 1;
+            }
+        }
+    }
+    let mut any = false;
+    for &t in &angs[..n] {
+        match stretch_d(s, p.r0, p.c0, t.cos(), t.sin()) {
+            Some((d1, d2)) => {
+                any = true;
+                d1lo = d1lo.min(d1);
+                d1hi = d1hi.max(d1);
+                d2lo = d2lo.min(d2);
+                d2hi = d2hi.max(d2);
+            }
+            None => covers = false,
+        }
+    }
+    if !any {
+        return (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
+    let e3 = (p.z00 - p.z01 - p.z10 + p.z11).abs();
+    let g = (p.z01 - p.z00).abs().max((p.z11 - p.z10).abs())
+        + (p.z10 - p.z00).abs().max((p.z11 - p.z01).abs())
+        + 2.0 * e3;
+    let e_pos = (s.e_ue + s.e_ve) * res; // observer position error, map units
+    let pad = 1e-9 * res + 2.0 * e_pos;
+    let slack = g * half.tan() * (1.0 + REL_B) / res;
+    let d_near = d1lo * half.cos() - pad;
+    // the observer's position error moves every point by e_pos, its eye by e_ze
+    let err_obs = if d_near > 0.0 { (g * (e_pos / res) + s.e_ze) / d_near } else { f64::INFINITY };
+    let (ub_v, size) = centre_max(p, s, cth, sth, d_near.max(0.0), d2hi / half.cos() + pad);
+    let ub = ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack);
+    let mut lb = f64::NEG_INFINITY;
+    if covers && d1hi < d2lo {
+        let (a, b) = (d1hi / half.cos() + pad, d2lo * half.cos() - pad);
+        if a < b {
+            let (lb_v, size) = centre_max(p, s, cth, sth, a, b);
+            lb = lb_v - slack - err_obs - REL_B * (size + lb_v.abs() + slack);
+        }
+    }
+    (lb, ub)
+}
+
+/// bin_bounds for a hairline interval theta +- w (a target's direction and its error):
+/// one stretch and one closed-form evaluation, unless a patch corner falls inside the
+/// interval (then the full routine).
+fn ray_bounds(p: &Patch, s: &Setup, theta: f64, w: f64, covers: bool) -> (f64, f64) {
+    for (a_, b_) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+        let (u, v) = (p.c0 + a_ - s.ue, p.r0 + b_ - s.ve);
+        // corner within the interval: its cross product with the ray is tiny
+        let (c, sn) = (theta.cos(), theta.sin());
+        let cross = u * sn - v * c;
+        if cross.abs() <= (u * u + v * v).sqrt() * (2.0 * w + 1e-12) && u * c + v * sn > 0.0 {
+            return bin_bounds(p, s, theta - w, theta + w, covers);
+        }
+    }
+    let (cth, sth) = (theta.cos(), theta.sin());
+    let Some((d1, d2)) = stretch_d(s, p.r0, p.c0, cth, sth) else {
+        return (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    };
+    let res = s.res;
+    let e3 = (p.z00 - p.z01 - p.z10 + p.z11).abs();
+    let g = (p.z01 - p.z00).abs().max((p.z11 - p.z10).abs())
+        + (p.z10 - p.z00).abs().max((p.z11 - p.z01).abs())
+        + 2.0 * e3;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    // rays within w of theta cross the patch between d1 and d2 up to a shift of
+    // d tan(w) / sin(incidence); with no corner in the interval the faces crossed are
+    // the same, so a relative pad of 4 w (plus absolute) is generous at these widths
+    let pad = d2 * (4.0 * w.tan() + 1e-9) + 1e-9 * res + 2.0 * e_pos;
+    let slack = g * w.tan() * (1.0 + REL_B) / res;
+    let d_near = d1 - pad;
+    let err_obs = if d_near > 0.0 { (g * (e_pos / res) + s.e_ze) / d_near } else { f64::INFINITY };
+    let (ub_v, size) = centre_max(p, s, cth, sth, d_near.max(0.0), d2 + pad);
+    let ub = ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack);
+    let mut lb = f64::NEG_INFINITY;
+    if covers {
+        let (a, b) = (d1 + pad, d2 - pad);
+        if a < b {
+            let (lb_v, size) = centre_max(p, s, cth, sth, a, b);
+            lb = lb_v - slack - err_obs - REL_B * (size + lb_v.abs() + slack);
+        }
+    }
+    (lb, ub)
+}
+
+struct Cand {
+    r0: i64,
+    c0: i64,
+    lo_in: f64,
+    hi_in: f64,
+    ub: f64,
+}
+
+struct Bins {
+    low: Vec<f64>,
+    cand: Vec<Vec<Cand>>,
+    /// per bin: the largest upper bound of the candidates dropped when the list was
+    /// full (the smallest ones go): every dropped patch has H <= this in the bin
+    over: Vec<f64>,
+    n: usize,
+    scale: f64,
+}
+
+impl Bins {
+    fn new(n: usize) -> Bins {
+        let n = n.next_power_of_two();
+        Bins {
+            low: vec![f64::NEG_INFINITY; n],
+            cand: (0..n).map(|_| Vec::new()).collect(),
+            over: vec![f64::NEG_INFINITY; n],
+            n,
+            scale: n as f64 / (2.0 * std::f64::consts::PI),
+        }
+    }
+
+    fn index(&self, theta: f64) -> i64 {
+        ((theta + std::f64::consts::PI) * self.scale).floor() as i64
+    }
+
+    /// Insert a ring's patches, in parallel over chunks of bins: each chunk takes the
+    /// patches whose span meets it (bins are independent, so no two threads touch the
+    /// same bin).
+    fn insert_all(&mut self, grid: &Grid, s: &Setup, patches: &[(i64, i64, HPatch)]) {
+        let chunk = 256usize.min(self.n);
+        let n = self.n as i64;
+        let nchunks = self.n / chunk;
+        // route each patch to the chunks its span meets
+        let mut routes: Vec<Vec<usize>> = (0..nchunks).map(|_| Vec::new()).collect();
+        for (j, (_, _, hp)) in patches.iter().enumerate() {
+            let (a, b) = (self.index(hp.lo), self.index(hp.hi));
+            let (ca, cb) = (a.div_euclid(chunk as i64), b.div_euclid(chunk as i64));
+            for ch in ca..=cb {
+                routes[ch.rem_euclid(nchunks as i64) as usize].push(j);
+            }
+        }
+        let scale = self.scale;
+        let edge = |k: i64| k as f64 / scale - std::f64::consts::PI;
+        let index = |t: f64| ((t + std::f64::consts::PI) * scale).floor() as i64;
+        self.low
+            .par_chunks_mut(chunk)
+            .zip(self.cand.par_chunks_mut(chunk))
+            .zip(self.over.par_chunks_mut(chunk))
+            .zip(routes.par_iter())
+            .enumerate()
+            .for_each(|(ch, (((low, cand), over), route))| {
+                let base = (ch * chunk) as i64;
+                for &j in route {
+                    let (r0, c0, hp) = &patches[j];
+                    let p = corners(grid, *r0, *c0);
+                    let (a, b) = (index(hp.lo), index(hp.hi));
+                    let mut angles: Option<[f64; 4]> = None;
+                    for k in a..=b {
+                        let i = k.rem_euclid(n);
+                        if i < base || i >= base + chunk as i64 {
+                            continue;
+                        }
+                        let li = (i - base) as usize;
+                        if hp.slope <= low[li] {
+                            continue; // the crude whole-patch bound can't beat this bin
+                        }
+                        let ca = *angles.get_or_insert_with(|| {
+                            let mut ca = [0.0f64; 4];
+                            for (q, (a_, b_)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+                                ca[q] = (p.r0 + b_ - s.ve).atan2(p.c0 + a_ - s.ue);
+                            }
+                            ca
+                        });
+                        let (ta, tb) = (edge(k), edge(k + 1));
+                        let covers = hp.lo_in <= ta && hp.hi_in >= tb;
+                        let (lb, ub) = bin_bounds_with(&p, s, &ca, ta, tb, covers);
+                        if ub <= low[li] {
+                            continue;
+                        }
+                        if lb > low[li] {
+                            low[li] = lb;
+                            cand[li].retain(|c| c.ub > lb);
+                        }
+                        cand[li].push(Cand { r0: *r0, c0: *c0, lo_in: hp.lo_in, hi_in: hp.hi_in, ub });
+                        if cand[li].len() > CAND_CAP {
+                            // drop the smallest upper bound, remembering it
+                            let (m, _) = cand[li]
+                                .iter()
+                                .enumerate()
+                                .min_by(|a, b| a.1.ub.total_cmp(&b.1.ub))
+                                .unwrap();
+                            let dropped = cand[li].swap_remove(m);
+                            over[li] = over[li].max(dropped.ub);
+                        }
+                    }
+                }
+            });
+    }
+}
+
+enum Verdict {
+    Hidden,
+    /// Every inserted patch is certainly below the sightline except these candidates
+    /// (possibly none), whose own stretches the walk must check.
+    Clear(Vec<(i64, i64)>),
+    Unknown,
+}
+
+/// The target (slope bounds lo..hi, direction theta +- widen) against the bins.
+fn bins_verdict(bins: &Bins, grid: &Grid, s: &Setup, lo: f64, hi: f64, theta: f64, widen: f64) -> Verdict {
+    let n = bins.n as i64;
+    let (a, b) = (bins.index(theta - widen), bins.index(theta + widen));
+    let (mut lmin, mut lmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for k in a..=b {
+        let i = k.rem_euclid(n) as usize;
+        lmin = lmin.min(bins.low[i]);
+        lmax = lmax.max(bins.low[i]).max(bins.over[i]);
+    }
+    if hi < lmin {
+        return Verdict::Hidden;
+    }
+    // dominated and dropped patches have H <= lmax; candidates are checked at the
+    // target's own direction
+    let clear = lo > lmax;
+    let mut straddle = Vec::new();
+    for k in a..=b {
+        let i = k.rem_euclid(n) as usize;
+        for c in &bins.cand[i] {
+            if c.ub < lo {
+                continue; // below the target over the whole bin
+            }
+            let p = corners(grid, c.r0, c.c0);
+            let covers = c.lo_in <= theta - widen && c.hi_in >= theta + widen;
+            let (lb, ub) = ray_bounds(&p, s, theta, widen, covers);
+            if lb > hi {
+                return Verdict::Hidden;
+            }
+            if ub >= lo {
+                straddle.push((c.r0, c.c0));
+                if straddle.len() > 8 {
+                    return Verdict::Unknown; // the walk will be quicker than more checks
+                }
+            }
+        }
+    }
+    if clear && straddle.len() <= 8 {
+        Verdict::Clear(straddle)
+    } else {
+        Verdict::Unknown
+    }
+}
+
+/// The parts of [t_a, t_b] of the sightline to `cell` outside the given patches'
+/// stretches (each widened by 1.5 cells along the sightline): sorted, disjoint.
+fn skip_intervals(cell: &Cell, s: &Setup, t_a: f64, t_b: f64, holes: &[(i64, i64)]) -> Vec<(f64, f64)> {
+    let len = (cell.du * cell.du + cell.dv * cell.dv).sqrt();
+    let pad = 1.5 / len;
+    let mut cut: Vec<(f64, f64)> = holes
+        .iter()
+        .filter_map(|&(r0, c0)| {
+            let (mut ta, mut tb) = (f64::NEG_INFINITY, f64::INFINITY);
+            for (p0, d, k0) in [(s.ue, cell.du, c0), (s.ve, cell.dv, r0)] {
+                if d == 0.0 {
+                    continue;
+                }
+                let x = (k0 as f64 - p0) / d;
+                let y = ((k0 + 1) as f64 - p0) / d;
+                ta = ta.max(x.min(y));
+                tb = tb.min(x.max(y));
+            }
+            if ta.is_finite() && tb.is_finite() {
+                Some((ta - pad, tb + pad))
+            } else {
+                Some((t_a, t_b)) // degenerate: don't skip anything
+            }
+        })
+        .collect();
+    cut.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut out = Vec::new();
+    let mut from = t_a;
+    for (x, y) in cut {
+        if x > from {
+            out.push((from, x.min(t_b)));
+        }
+        from = from.max(y);
+        if from >= t_b {
+            break;
+        }
+    }
+    if from < t_b {
+        out.push((from, t_b));
+    }
+    out.retain(|&(x, y)| y > x);
+    out
 }
 
 /// The deferred cells with the horizon filters, in rings of increasing distance.
@@ -1327,7 +1595,9 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
     let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / RING) as usize + 4;
     let mut rings = bucket(&keyed, n_rings);
     rings.par_iter_mut().for_each(|ring| ring.sort_unstable_by(|a, b| a.0.total_cmp(&b.0)));
-    // every patch, by the ring before which it enters the horizon (prepared lazily)
+    // every patch, by the ring before which it lies entirely inside the processed
+    // radius (by its farthest point), so the bins only ever hold terrain nearer than
+    // every target they are asked about; prepared lazily
     let (rows_i, cols_i) = (rows as i64, cols as i64);
     let near = NEAR * res;
     let pkeys: Vec<(usize, (i64, i64, f64))> = (-1..rows_i)
@@ -1336,39 +1606,34 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
             (-1..cols_i).filter_map(move |c0| {
                 let d0 = patch_dmin(s, r0, c0);
                 if d0 < near {
-                    None
-                } else {
-                    Some((ring_of(d0, res), (r0, c0, d0)))
+                    return None;
                 }
+                let mut far: f64 = 0.0;
+                for (a, b) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    let (u, v) = (c0 as f64 + a - s.ue, r0 as f64 + b - s.ve);
+                    far = far.max((u * u + v * v).sqrt());
+                }
+                let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
+                Some((ring_of(far, res), (r0, c0, d0)))
             })
         })
         .collect();
     let pbuckets = bucket(&pkeys, n_rings);
-    let mut low_pending: Vec<Vec<HPatch>> = (0..n_rings).map(|_| Vec::new()).collect();
-    let mut horizon = Horizon::new(SECTORS * rows.max(cols));
+    let mut bins = Bins::new(SECTORS * rows.max(cols));
     for ring in 0..n_rings {
-        // every patch nearer than the ring's inner edge (less a cell, for rounding)
+        // every patch entirely nearer than the ring's inner edge (less a cell)
         let inserted = ((ring as f64) * RING - 1.0) * res;
         if !pbuckets[ring].is_empty() {
-            let prepared: Vec<HPatch> = pbuckets[ring]
+            let prepared: Vec<(i64, i64, HPatch)> = pbuckets[ring]
                 .par_iter()
-                .filter_map(|&(r0, c0, d0)| prepare_patch(grid, s, r0, c0, d0))
+                .filter_map(|&(r0, c0, d0)| prepare_patch(grid, s, r0, c0, d0).map(|hp| (r0, c0, hp)))
                 .collect();
-            for p in prepared {
-                horizon.insert(p.lo, p.hi, p.slope);
-                let k = ring_of(p.dmax, res).max(ring).min(n_rings - 1);
-                low_pending[k].push(p);
-            }
-        }
-        for p in std::mem::take(&mut low_pending[ring]) {
-            if p.hi_in > p.lo_in {
-                horizon.insert_low(p.lo_in, p.hi_in, p.slope_low);
-            }
+            bins.insert_all(grid, s, &prepared);
         }
         if rings[ring].is_empty() {
             continue;
         }
-        let h = &horizon;
+        let h = &bins;
         let results: Vec<(usize, bool)> = rings[ring]
             .par_chunks(64)
             .flat_map_iter(|chunk| {
@@ -1385,15 +1650,28 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                             continue;
                         }
                     }
-                    let tsl = target_slope(s, &cell, zt);
-                    if let Some(t) = tsl {
-                        if horizon_hidden(h, t) {
-                            out.push((idx, false));
-                            continue;
+                    let mut mid = Vec::new();
+                    if let Some((lo, hi, theta, widen, dist)) = target_slope(s, &cell, zt) {
+                        match bins_verdict(h, grid, s, lo, hi, theta, widen) {
+                            Verdict::Hidden => {
+                                out.push((idx, false));
+                                continue;
+                            }
+                            Verdict::Clear(straddle) => {
+                                // t_a: beyond it every patch crossed is NEAR cells away;
+                                // t_b: up to it every patch crossed lies entirely inside
+                                // `inserted` (sqrt 2 cells of patch, plus rounding); the
+                                // straddling candidates' own stretches stay with the walk
+                                let t_a = (NEAR * res + 2.0 * res) / dist;
+                                let t_b = (inserted - 2.0 * res) / dist;
+                                if t_b > t_a + 0.01 {
+                                    mid = skip_intervals(&cell, s, t_a, t_b, &straddle);
+                                }
+                            }
+                            Verdict::Unknown => {}
                         }
                     }
-                    let mid = tsl.and_then(|t| horizon_stretch(h, s, t, inserted));
-                    let (st, r0, c0) = walk(&cell, grid, pyr, r, c, &mut failed, mid, &mut 0);
+                    let (st, r0, c0) = walk(&cell, grid, pyr, r, c, &mut failed, &mid, &mut 0);
                     let visible = match st {
                         State::Blocking => {
                             blocker = Some((r0, c0));
@@ -1489,7 +1767,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                             continue;
                         }
                     }
-                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, None, &mut n);
+                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, &[], &mut n);
                     if st == State::Blocking {
                         blocker = Some((r0, c0));
                     }
@@ -1497,7 +1775,11 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                 n
             })
             .sum();
-        work as f64 / SAMPLE as f64 >= HORIZON_AT
+        let mean = work as f64 / SAMPLE as f64;
+        if std::env::var("VIEWSHED_DEBUG").is_ok() {
+            eprintln!("sampled segments per cell {mean:.2}");
+        }
+        mean >= HORIZON_AT
     } else {
         false
     };
@@ -1519,7 +1801,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                             continue;
                         }
                     }
-                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, None, &mut 0);
+                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, &[], &mut 0);
                     out.push((idx, match st {
                         State::Blocking => {
                             blocker = Some((r0, c0));
