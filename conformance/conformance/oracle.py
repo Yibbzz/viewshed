@@ -9,7 +9,9 @@ nowhere strictly below the surface.
 Method: the sightline is cut where it crosses the lines joining cell centres
 (Amanatides-Woo style, so no patch is skipped). Inside one bilinear patch the
 gap (line minus surface) is a quadratic in t, so its minimum is found in
-closed form. Float first; near-ties are redone in exact rational arithmetic.
+closed form. Float first, with every segment certified blocking or clear by a
+rigorous bound on its rounding error (certify.py); a cell with no certainly
+blocking segment and some undecided one is redone in exact rational arithmetic.
 
 Per cell it also returns the clearance: the smallest gap over the sightline,
 leaving out the last half cell before the target (which with target_height
@@ -21,7 +23,9 @@ from fractions import Fraction
 
 import numpy as np
 
-VERSION = "bilinear-2"   # 2: earth curvature and refraction
+from . import certify
+
+VERSION = "bilinear-3"   # 2: earth curvature and refraction; 3: certified float decisions
 
 
 def _corners(z, r0, c0):
@@ -129,8 +133,8 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
         raise ValueError("there is no height data under the observer")
     ze = float(ground) + observer_height
     drop = drop_factor(curvature, refraction, earth_radius)
-    tol = 1e-9 * (1.0 + np.nanmax(np.abs(z)) + abs(ze))
     res = abs(transform[1])
+    raster = certify.Raster(transform, x, y, ground, observer_height, ue, ve, ze)
     visible = np.zeros(z.shape, dtype=bool)
     clearance = np.full(z.shape, np.nan)
     n_exact = 0
@@ -142,29 +146,37 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
             L = math.hypot(du, dv)
             if max_distance is not None and L * res > max_distance:
                 continue
-            bend = drop * (du * du + dv * dv) * res * res
-            dz = z[r, c] - bend + target_height - ze
-            ts = sorted({0.0, 1.0, *_crossings(ue, du), *_crossings(ve, dv)})
+            cell = certify.make_cell(ue, ve, ze, raster.e_ue, raster.e_ve, raster.e_ze,
+                                     target_height, drop, res, z[r, c], r, c)
+            bend, dz = cell.bend, cell.dz
+            ts, flagged = certify.boundaries(cell, r, c)
             t_far = 1 - 0.5 / L if L > 0.5 else 0.0
-            mn, far = math.inf, math.inf
+            far = math.inf
+            certain_block = undecided = False
             for i, (ta, tb) in enumerate(zip(ts, ts[1:])):
-                last = target_height if i == len(ts) - 2 else None
-                m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last, bend)
-                if m is None:
-                    continue
-                mn = min(mn, m)
-                if ta < t_far:
+                last = i == len(ts) - 2
+                m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, target_height if last else None,
+                                 bend)
+                if m is not None and ta < t_far:
                     mf = m if tb <= t_far else _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far,
                                                             bend=bend)
                     far = min(far, mf)
-            if mn < -tol:
+                if ta in flagged or tb in flagged:
+                    undecided = True
+                    continue
+                state = certify.segment(cell, z, ta, tb, last)[0]
+                if state == certify.BLOCKING:
+                    certain_block = True
+                elif state == certify.UNDECIDED:
+                    undecided = True
+            if certain_block:
                 blocked = True
-            elif mn > tol:
-                blocked = False
-            else:
+            elif undecided:
                 n_exact += 1
                 blocked = _blocked_exact(z, transform, x, y, ground, observer_height,
                                          r, c, target_height, drop)
+            else:
+                blocked = False
             visible[r, c] = not blocked
             clearance[r, c] = far
     return visible, clearance, n_exact

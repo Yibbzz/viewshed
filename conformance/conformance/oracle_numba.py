@@ -1,24 +1,60 @@
-"""The bilinear oracle (oracle.py) compiled with numba: the same loops, the same
-float operations in the same order, so the result is bit-identical to
-oracle.viewshed (tests/test_oracle_fast.py holds it to that).
+"""The bilinear oracle (oracle.py) compiled with numba.
 
-numba compiles without fastmath, so there is no reassociation and no fused
-multiply-add: every operation rounds exactly as CPython's float does. Two things
-stay in Python because numba's versions could round differently: math.hypot
-(CPython has its own algorithm) and the rational-arithmetic tie check.
+viewshed(..., clearance=True), the full pass, is bit-identical to oracle.viewshed:
+the same loops and the same float operations in the same order (numba compiles
+without fastmath: no reassociation, no fused multiply-add, so every operation
+rounds as CPython's float does), and the same certifier, compiled from certify.py's
+own functions. Visibility, clearance and the count of cells sent to exact
+arithmetic all match (tests/test_oracle_fast.py). math.hypot stays in Python
+(CPython has its own algorithm), and so does the exact arithmetic.
+
+viewshed(..., clearance=False) decides visibility only, much faster: it skips
+blocks of patches whose certified lower bound on the exact gap is > 0, stops at the
+first certainly blocking segment, generates boundaries as a stream, and tries the
+previous cell's blocker first. Its visibility is identical; its exact-check count
+can be lower, since a skipped block is certified as a whole and its slivers never
+come up.
+
+Either way, a cell that needs exact arithmetic is checked exactly only on the
+patches it is undecided on (and their neighbours): every other segment is
+certified clear, so this decides exactly what oracle._blocked_exact does.
 
 Python's min(a, b) keeps a unless b < a; the `if v < m` updates below copy that.
 """
 
 import math
+import types
 
 import numpy as np
 from numba import njit, prange
 
-from . import oracle
-from .oracle_fast import WINDOW, blocked_exact_patches
+from . import certify, oracle
+from .oracle_fast import blocked_exact_patches
 
 VERSION = oracle.VERSION
+
+
+def _compile_certify():
+    """certify.py's float functions, compiled: the same code objects with their
+    globals pointing at the compiled versions of each other."""
+    g = dict(certify.__dict__)
+    for name in ("two_sum_err", "two_prod", "make_cell", "crossings_equal",
+                 "near_observer_flag", "coord_errors", "gap_and_error", "derivatives",
+                 "_blocking_at", "certainly_blocking", "segment"):
+        f = getattr(certify, name)
+        g[name] = njit(cache=True)(types.FunctionType(f.__code__, g, f.__name__, f.__defaults__,
+                                                      f.__closure__))
+    return g
+
+
+_C = _compile_certify()
+make_cell = _C["make_cell"]
+crossings_equal = _C["crossings_equal"]
+near_observer_flag = _C["near_observer_flag"]
+certainly_blocking = _C["certainly_blocking"]
+segment = _C["segment"]
+U = certify.U
+BLOCKING, UNDECIDED = certify.BLOCKING, certify.UNDECIDED
 
 
 @njit(cache=True)
@@ -46,35 +82,6 @@ def _crossings_sorted(buf, p0, d):
             n += 1
             k -= 1
     return n
-
-
-@njit(cache=True)
-def _merge(ts, U, nu, V, nv):
-    """sorted(set([0, 1, *U, *V])) for ascending U and V; returns the length."""
-    ts[0] = 0.0
-    k = 1
-    i = 0
-    j = 0
-    one = False
-    while i < nu or j < nv or not one:
-        best = np.inf
-        src = 3
-        if i < nu and U[i] < best:
-            best = U[i]; src = 0
-        if j < nv and V[j] < best:
-            best = V[j]; src = 1
-        if not one and 1.0 < best:
-            best = 1.0; src = 2
-        if src == 0:
-            i += 1
-        elif src == 1:
-            j += 1
-        else:
-            one = True
-        if best != ts[k - 1]:
-            ts[k] = best
-            k += 1
-    return k
 
 
 @njit(cache=True)
@@ -126,45 +133,6 @@ def _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last, bend):
     return m
 
 
-@njit(cache=True, parallel=True)
-def _float_pass(z, ue, ve, ze, th, drop, res, max_d, cells, L, mn_out, far_out):
-    """oracle.viewshed's per-cell float loop for the listed cells (in parallel:
-    each cell is independent, so the result doesn't depend on the split)."""
-    rows, cols = z.shape
-    for i in prange(cells.shape[0]):
-        U = np.empty(cols + 4)
-        V = np.empty(rows + 4)
-        ts = np.empty(rows + cols + 8)
-        r = cells[i, 0]
-        c = cells[i, 1]
-        du = c - ue
-        dv = r - ve
-        bend = drop * (du * du + dv * dv) * res * res
-        dz = z[r, c] - bend + th - ze
-        k = _merge(ts, U, _crossings_sorted(U, ue, du), V, _crossings_sorted(V, ve, dv))
-        Li = L[i]
-        t_far = 1 - 0.5 / Li if Li > 0.5 else 0.0
-        mn = np.inf
-        far = np.inf
-        for j in range(k - 1):
-            ta = ts[j]
-            tb = ts[j + 1]
-            m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, j == k - 2, bend)
-            if math.isnan(m):
-                continue
-            if m < mn:
-                mn = m
-            if ta < t_far:
-                if tb <= t_far:
-                    mf = m
-                else:
-                    mf = _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far, False, bend)
-                if mf < far:
-                    far = mf
-        mn_out[i] = mn
-        far_out[i] = far
-
-
 def _pyramid(z):
     """Max-pyramid over patches, for the pruned pass. Patch (r0, c0), r0 in -1..rows-1,
     sits at [r0 + 1, c0 + 1]; its value is the highest of the four corners the oracle
@@ -190,89 +158,6 @@ def _pyramid(z):
     offs = np.cumsum([0] + [a.size for a in levels]).astype(np.int64)
     shapes = np.array([a.shape for a in levels], dtype=np.int64)
     return np.concatenate([a.ravel() for a in levels]), offs, shapes
-
-
-@njit(cache=True, parallel=True)
-def _float_pass_pruned(z, ue, ve, ze, th, drop, res, cells, L, mn_out, far_out,
-                       pyr, offs, shapes, margin):
-    """_float_pass with the same results, walking each sightline from the target
-    back to the observer and skipping blocks of patches whose lower bound on the gap
-    is more than `margin` above both running minima. A skipped segment's computed
-    value is then strictly above them, so the minima (and their bits) don't change.
-    Walking backwards, ties keep the later-walked value (<=): that is the earlier
-    one in t, which is what Python's min keeps in oracle.py."""
-    rows, cols = z.shape
-    nlev = shapes.shape[0]
-    for i in prange(cells.shape[0]):
-        U = np.empty(cols + 4)
-        V = np.empty(rows + 4)
-        ts = np.empty(rows + cols + 8)
-        r = cells[i, 0]
-        c = cells[i, 1]
-        du = c - ue
-        dv = r - ve
-        bend = drop * (du * du + dv * dv) * res * res
-        dz = z[r, c] - bend + th - ze
-        k = _merge(ts, U, _crossings_sorted(U, ue, du), V, _crossings_sorted(V, ve, dv))
-        Li = L[i]
-        t_far = 1 - 0.5 / Li if Li > 0.5 else 0.0
-        mn = np.inf
-        far = np.inf
-        j = k - 2
-        while j >= 0:
-            ta = ts[j]
-            tb = ts[j + 1]
-            if ta < t_far and far < np.inf:
-                thr = max(mn, far) + margin
-                mid = (ta + tb) / 2
-                pr = math.floor(ve + mid * dv) + 1
-                pc = math.floor(ue + mid * du) + 1
-                skip_to = -1.0
-                for lev in range(nlev - 1, 0, -1):
-                    br = pr >> lev
-                    bc = pc >> lev
-                    h = shapes[lev, 0]
-                    w = shapes[lev, 1]
-                    if br < 0 or bc < 0 or br >= h or bc >= w:
-                        continue
-                    M = pyr[offs[lev] + br * w + bc]
-                    # where the sightline enters this block (forward in t); the same
-                    # (k - p0) / d formula as the crossings, so it lands on a ts value
-                    te = 0.0
-                    if du > 0:
-                        te = max(te, ((bc << lev) - 1 - ue) / du)
-                    elif du < 0:
-                        te = max(te, (((bc + 1) << lev) - 1 - ue) / du)
-                    if dv > 0:
-                        te = max(te, ((br << lev) - 1 - ve) / dv)
-                    elif dv < 0:
-                        te = max(te, (((br + 1) << lev) - 1 - ve) / dv)
-                    if te >= ta:
-                        continue                   # the block holds no more than this segment
-                    lo_line = min(ze + te * dz, ze + tb * dz)
-                    lo_bend = bend * te * te if bend >= 0 else bend * tb * tb
-                    if lo_line - M + lo_bend > thr:
-                        skip_to = te
-                        break
-                if skip_to >= 0:
-                    # drop every segment with ta >= skip_to
-                    while j >= 0 and ts[j] >= skip_to:
-                        j -= 1
-                    continue
-            m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, j == k - 2, bend)
-            if not math.isnan(m):
-                if m <= mn:
-                    mn = m
-                if ta < t_far:
-                    if tb <= t_far:
-                        mf = m
-                    else:
-                        mf = _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far, False, bend)
-                    if mf <= far:
-                        far = mf
-            j -= 1
-        mn_out[i] = mn
-        far_out[i] = far
 
 
 @njit(cache=True, inline="always")
@@ -306,207 +191,386 @@ def _first_above(k0, step, n, i, p0, d, t):
     return lo
 
 
-@njit(cache=True, inline="always")
-def _patch_segment(ue, ve, du, dv, r0, c0):
-    """(ta, tb) of the sightline's segment inside patch (r0, c0), exactly as in
-    oracle.py's boundary list, or (-1, -1) when that can't be guaranteed. Inside a
-    patch there are no other boundaries, so the segment runs from the entry to the
-    exit crossing; both come from the crossings' (k - p0) / d. Patches near either
-    end are left out: there 0, 1 or a crossing rounded past 1 can take part."""
-    if du > 0:
-        tu0 = (c0 - ue) / du
-        tu1 = (c0 + 1 - ue) / du
-    elif du < 0:
-        tu0 = (c0 + 1 - ue) / du
-        tu1 = (c0 - ue) / du
-    else:
-        if not (c0 < ue < c0 + 1):
-            return -1.0, -1.0
-        tu0 = -np.inf
-        tu1 = np.inf
-    if dv > 0:
-        tv0 = (r0 - ve) / dv
-        tv1 = (r0 + 1 - ve) / dv
-    elif dv < 0:
-        tv0 = (r0 + 1 - ve) / dv
-        tv1 = (r0 - ve) / dv
-    else:
-        if not (r0 < ve < r0 + 1):
-            return -1.0, -1.0
-        tv0 = -np.inf
-        tv1 = np.inf
-    ta = max(tu0, tv0)
-    tb = min(tu1, tv1)
-    if not (1e-6 < ta < tb < 1 - 1e-6):
-        return -1.0, -1.0
-    mid = (ta + tb) / 2
-    if math.floor(ue + mid * du) != c0 or math.floor(ve + mid * dv) != r0:
-        return -1.0, -1.0
-    return ta, tb
+@njit(cache=True)
+def _boundaries(cell, r, c, rt, ra, rk, ts, fl):
+    """certify.boundaries in compiled form: fills ts[:n] (sorted, unique) and fl[:n]
+    (flagged), returns n. The raw list is merged in oracle.py's order: a stable sort
+    of [0, 1, u crossings by k, v crossings by k], so equal values come 0, 1, u, v."""
+    ue, ve, du, dv = cell.ue, cell.ve, cell.du, cell.dv
+    uk, us, un = _axis(ue, du)
+    vk, vs, vn = _axis(ve, dv)
+    ui = 0
+    vi = 0
+    n = 0
+    rt[0] = 0.0
+    ra[0] = 0
+    rk[0] = 0
+    n = 1
+    one = False
+    while ui < un or vi < vn or not one:
+        best = np.inf
+        src = -1
+        if not one:
+            best = 1.0
+            src = 1
+        if ui < un:
+            t = (uk + ui * us - ue) / du
+            if t < best:
+                best = t
+                src = 2
+        if vi < vn:
+            t = (vk + vi * vs - ve) / dv
+            if t < best:
+                best = t
+                src = 3
+        rt[n] = best
+        ra[n] = src
+        if src == 1:
+            rk[n] = 0
+            one = True
+        elif src == 2:
+            rk[n] = uk + ui * us
+            ui += 1
+        else:
+            rk[n] = vk + vi * vs
+            vi += 1
+        n += 1
+    # unique values and flags
+    lim = 16 * cell.delta
+    m = 0
+    ts[0] = rt[0]
+    fl[0] = False
+    for i in range(1, n):
+        if rt[i] != rt[i - 1]:
+            m += 1
+            ts[m] = rt[i]
+            fl[m] = False
+        if rt[i] - rt[i - 1] <= lim and not (rt[i] == rt[i - 1] and crossings_equal(
+                cell, ra[i - 1], rk[i - 1], ra[i], rk[i], r, c)):
+            fl[m] = True
+            fl[m - 1 if rt[i] != rt[i - 1] else m] = True
+    m += 1
+    if near_observer_flag(cell):
+        fl[0] = True
+    if not math.isfinite(cell.delta):
+        for i in range(m):
+            fl[i] = True
+    return m
 
 
 @njit(cache=True, parallel=True)
-def _decide_pass(z, ue, ve, ze, th, drop, res, cells, out, pyr, offs, shapes, tol, margin):
-    """Visibility without clearance: out = 0 visible (every segment > tol), 1 blocked
-    (some segment < -tol), 2 for the exact check. That is oracle.py's decision on its
-    minimum, so it agrees cell for cell. Walks forward, generating the boundaries as
-    a stream (the same floats, order and de-duplication as sorted(set(...))), skips
-    blocks whose lower bound on the gap is above tol + margin (their segments can't
-    change the decision), and stops at the first segment below -tol."""
-    nlev = shapes.shape[0]
-    chunk = 512
-    for q in prange((cells.shape[0] + chunk - 1) // chunk):
-      br0 = -(1 << 40)                     # patch that blocked the previous cell
-      bc0 = -(1 << 40)
-      for i in range(q * chunk, min((q + 1) * chunk, cells.shape[0])):
+def _full_pass(z, ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, cells, L, state_out, far_out):
+    """oracle.viewshed's per-cell loop: clearance, and the certified decision
+    (0 visible, 1 blocked, 2 exact check)."""
+    rows, cols = z.shape
+    for i in prange(cells.shape[0]):
+        size = rows + cols + 8
+        rt = np.empty(size)
+        ra = np.empty(size, np.int64)
+        rk = np.empty(size, np.int64)
+        ts = np.empty(size)
+        fl = np.empty(size, np.bool_)
         r = cells[i, 0]
         c = cells[i, 1]
-        du = c - ue
-        dv = r - ve
-        bend = drop * (du * du + dv * dv) * res * res
-        dz = z[r, c] - bend + th - ze
-        # blocker reuse: the previous cell's blocker often hides this one too
-        if br0 > -(1 << 40):
-            sa, sb = _patch_segment(ue, ve, du, dv, br0, bc0)
-            if sa >= 0:
-                m = _segment_min(z, ue, ve, ze, du, dv, dz, sa, sb, False, bend)
-                if m < -tol:
-                    out[i] = 1
-                    continue
-        uk, us, un = _axis(ue, du)
-        vk, vs, vn = _axis(ve, dv)
-        ui = 0
-        vi = 0
-        one = False                      # 1.0 emitted yet
-        thr = tol + margin
-        failed = np.full(nlev, -1, np.int64)   # last block tried in vain, per level
-        state = 0
-        ta = 0.0
-        # next boundary after ta
-        while True:
-            best = np.inf
-            if ui < un:
-                best = min(best, (uk + ui * us - ue) / du)
-            if vi < vn:
-                best = min(best, (vk + vi * vs - ve) / dv)
-            if not one:
-                best = min(best, 1.0)
-            if best == np.inf:
-                break
-            # consume everything equal to best (the set() drops repeats)
-            if ui < un and (uk + ui * us - ue) / du == best:
-                ui += 1
-            if vi < vn and (vk + vi * vs - ve) / dv == best:
-                vi += 1
-            if not one and best == 1.0:
-                one = True
-            if best == ta:
-                continue
-            tb = best
-            last = ui >= un and vi >= vn and one
-            mid = (ta + tb) / 2
-            pr = math.floor(ve + mid * dv) + 1
-            pc = math.floor(ue + mid * du) + 1
-            skip_to = -1.0
-            for lev in range(nlev - 1, 0, -1):
-                br = pr >> lev
-                bc = pc >> lev
-                h = shapes[lev, 0]
-                w = shapes[lev, 1]
-                if br < 0 or bc < 0 or br >= h or bc >= w:
-                    continue
-                key = br * w + bc
-                if failed[lev] == key:
-                    continue
-                M = pyr[offs[lev] + key]
-                tx = np.inf
-                if du > 0:
-                    tx = min(tx, (((bc + 1) << lev) - 1 - ue) / du)
-                elif du < 0:
-                    tx = min(tx, ((bc << lev) - 1 - ue) / du)
-                if dv > 0:
-                    tx = min(tx, (((br + 1) << lev) - 1 - ve) / dv)
-                elif dv < 0:
-                    tx = min(tx, ((br << lev) - 1 - ve) / dv)
-                if tx <= tb:
-                    continue
-                lo_line = min(ze + ta * dz, ze + tx * dz)
-                lo_bend = bend * ta * ta if bend >= 0 else bend * tx * tx
-                if lo_line - M + lo_bend > thr:
-                    skip_to = tx
-                    break
-                failed[lev] = key
-            if skip_to >= 0:
-                # drop every segment with tb <= skip_to: the new ta is the last
-                # boundary <= skip_to, and the stream resumes after it
-                nta = tb
-                j = _first_above(uk, us, un, ui, ue, du, skip_to)
-                if j > ui:
-                    nta = max(nta, (uk + (j - 1) * us - ue) / du)
-                    ui = j
-                j = _first_above(vk, vs, vn, vi, ve, dv, skip_to)
-                if j > vi:
-                    nta = max(nta, (vk + (j - 1) * vs - ve) / dv)
-                    vi = j
-                if not one and 1.0 <= skip_to:
-                    one = True
-                    nta = max(nta, 1.0)
-                ta = nta
-                continue
+        cell = make_cell(ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, z[r, c], r, c)
+        du, dv, dz, bend = cell.du, cell.dv, cell.dz, cell.bend
+        k = _boundaries(cell, r, c, rt, ra, rk, ts, fl)
+        Li = L[i]
+        t_far = 1 - 0.5 / Li if Li > 0.5 else 0.0
+        far = np.inf
+        block = False
+        undecided = False
+        for j in range(k - 1):
+            ta = ts[j]
+            tb = ts[j + 1]
+            last = j == k - 2
             m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, last, bend)
-            if not math.isnan(m):
-                if m < -tol:
-                    state = 1
-                    br0 = math.floor(ve + mid * dv)
-                    bc0 = math.floor(ue + mid * du)
-                    break
-                if not (m > tol):
-                    state = 2
-            ta = tb
-        out[i] = state
+            if not math.isnan(m) and ta < t_far:
+                if tb <= t_far:
+                    mf = m
+                else:
+                    mf = _segment_min(z, ue, ve, ze, du, dv, dz, ta, t_far, False, bend)
+                if mf < far:
+                    far = mf
+            if fl[j] or fl[j + 1]:
+                undecided = True
+                continue
+            st = segment(cell, z, ta, tb, last)[0]
+            if st == BLOCKING:
+                block = True
+            elif st == UNDECIDED:
+                undecided = True
+        state_out[i] = 1 if block else (2 if undecided else 0)
+        far_out[i] = far
 
 
 @njit(cache=True)
-def _near_zero(z, ue, ve, ze, th, drop, res, r, c, window, out):
-    """oracle_fast.near_zero_patches without the neighbours: (r0, c0) of every float
-    segment of cell (r, c) whose minimum is within `window` of 0. Returns the count."""
+def _undecided_patches(z, ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, r, c, out):
+    """(r0, c0) of every segment of cell (r, c) the certifier leaves undecided
+    (flagged ones included, patch from the midpoint). Returns the count."""
     rows, cols = z.shape
-    U = np.empty(cols + 4)
-    V = np.empty(rows + 4)
-    ts = np.empty(rows + cols + 8)
-    du = c - ue
-    dv = r - ve
-    bend = drop * (du * du + dv * dv) * res * res
-    dz = z[r, c] - bend + th - ze
-    k = _merge(ts, U, _crossings_sorted(U, ue, du), V, _crossings_sorted(V, ve, dv))
+    size = rows + cols + 8
+    rt = np.empty(size)
+    ra = np.empty(size, np.int64)
+    rk = np.empty(size, np.int64)
+    ts = np.empty(size)
+    fl = np.empty(size, np.bool_)
+    cell = make_cell(ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, z[r, c], r, c)
+    k = _boundaries(cell, r, c, rt, ra, rk, ts, fl)
     n = 0
     for j in range(k - 1):
         ta = ts[j]
         tb = ts[j + 1]
-        m = _segment_min(z, ue, ve, ze, du, dv, dz, ta, tb, j == k - 2, bend)
-        if not math.isnan(m) and m <= window:
+        if fl[j] or fl[j + 1]:
+            st = UNDECIDED
             mid = (ta + tb) / 2
-            out[n, 0] = math.floor(ve + mid * dv)
-            out[n, 1] = math.floor(ue + mid * du)
+            r0 = math.floor(ve + mid * cell.dv)
+            c0 = math.floor(ue + mid * cell.du)
+        else:
+            st, r0, c0 = segment(cell, z, ta, tb, j == k - 2)
+        if st == UNDECIDED:
+            out[n, 0] = r0
+            out[n, 1] = c0
             n += 1
     return n
 
 
-def _exact(z, transform, x, y, ground, oh, ue, ve, ze, th, drop, res, tol, r, c):
-    """oracle_fast's candidate-patch exact check, candidates found in compiled code."""
-    buf = np.empty((z.shape[0] + z.shape[1] + 8, 2), np.int64)
-    n = _near_zero(z, ue, ve, ze, th, drop, res, r, c, WINDOW * tol, buf)
-    patches = sorted({(int(a) + i, int(b) + j) for a, b in buf[:n] for i in (-1, 0, 1)
-                      for j in (-1, 0, 1)})
-    return blocked_exact_patches(z, transform, x, y, ground, oh, r, c, th, drop, patches)
+@njit(cache=True, inline="always")
+def _peek(uk, us, un, ui, ue, du, vk, vs, vn, vi, ve, dv, one):
+    """The next raw boundary value (inf when none)."""
+    best = np.inf
+    if not one:
+        best = 1.0
+    if ui < un:
+        best = min(best, (uk + ui * us - ue) / du)
+    if vi < vn:
+        best = min(best, (vk + vi * vs - ve) / dv)
+    return best
+
+
+@njit(cache=True)
+def _group_ok(cell, r, c, has1, hu, ku, hv, kv):
+    """Whether the raw boundaries sharing one value (in the order 1, u, v) are
+    certainly equal exactly, consecutive pair by pair as certify.boundaries checks."""
+    pa = -1
+    pk = 0
+    for axis in (1, 2, 3):
+        present = has1 if axis == 1 else (hu if axis == 2 else hv)
+        if not present:
+            continue
+        k = 0 if axis == 1 else (ku if axis == 2 else kv)
+        if pa >= 0 and not crossings_equal(cell, pa, pk, axis, k, r, c):
+            return False
+        pa = axis
+        pk = k
+    return True
+
+
+@njit(cache=True, inline="always")
+def _reuse_blocks(cell, z, r0, c0):
+    """Whether patch (r0, c0), which blocked the previous cell, certainly blocks this
+    sightline too: its exact segment there runs between the face crossings (within
+    delta of their floats), and certainly_blocking checks points inside it."""
+    rows, cols = z.shape
+    ue, ve, du, dv = cell.ue, cell.ve, cell.du, cell.dv
+    ta = 0.0
+    tb = 1.0
+    for i in range(2):
+        p0, d, k0, e_p, e_d = ((ue, du, c0, cell.e_ue, cell.e_du) if i == 0 else
+                               (ve, dv, r0, cell.e_ve, cell.e_dv))
+        if d == 0:
+            if not (e_d == 0 and e_p == 0 and math.floor(p0) == k0):
+                return False
+            continue
+        a = (k0 - p0) / d
+        b = (k0 + 1 - p0) / d
+        ta = max(ta, min(a, b))
+        tb = min(tb, max(a, b))
+    ra = min(max(r0, 0), rows - 1)
+    rb = min(max(r0 + 1, 0), rows - 1)
+    ca = min(max(c0, 0), cols - 1)
+    cb = min(max(c0 + 1, 0), cols - 1)
+    z00 = z[ra, ca]
+    z01 = z[ra, cb]
+    z10 = z[rb, ca]
+    z11 = z[rb, cb]
+    if math.isnan(z00) or math.isnan(z01) or math.isnan(z10) or math.isnan(z11):
+        return False
+    return certainly_blocking(cell, z00, z01, z10, z11, c0, r0, ta, tb)
+
+
+@njit(cache=True, parallel=True)
+def _decide_pass(z, ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, cells, out, pyr, offs, shapes):
+    """Visibility without clearance: out = 0 visible, 1 blocked, 2 exact check.
+    Walks forward over the boundaries as a stream (oracle.py's floats, order and
+    de-duplication, with certify.boundaries' flags computed on the fly), skips any
+    block of patches on which the exact gap is certainly > 0, and stops at the first
+    certainly blocking segment."""
+    nlev = shapes.shape[0]
+    chunk = 512
+    for q in prange((cells.shape[0] + chunk - 1) // chunk):
+      have = False                          # patch that blocked the previous cell
+      br0 = 0
+      bc0 = 0
+      failed = np.full(nlev, -1, np.int64)
+      for i in range(q * chunk, min((q + 1) * chunk, cells.shape[0])):
+        r = cells[i, 0]
+        c = cells[i, 1]
+        cell = make_cell(ue, ve, ze, e_ue, e_ve, e_ze, th, drop, res, z[r, c], r, c)
+        du, dv, dz, bend, delta = cell.du, cell.dv, cell.dz, cell.bend, cell.delta
+        if have and _reuse_blocks(cell, z, br0, bc0):
+            out[i] = 1
+            continue
+        for lev in range(nlev):
+            failed[lev] = -1
+        uk, us, un = _axis(ue, du)
+        vk, vs, vn = _axis(ve, dv)
+        ui = 0
+        vi = 0
+        one = False
+        lim = 16 * delta
+        # line and curvature errors for the block bounds
+        e_ze_ = cell.e_ze
+        e_dz = cell.e_dz
+        bend_lo = bend - cell.e_bend
+        # t = 0 and its flag (no crossing is ever at 0 exactly, see certify)
+        ta = 0.0
+        nxt = _peek(uk, us, un, ui, ue, du, vk, vs, vn, vi, ve, dv, one)
+        fa = near_observer_flag(cell) or nxt - ta <= lim or not math.isfinite(delta)
+        state = 0
+        while True:
+            b = _peek(uk, us, un, ui, ue, du, vk, vs, vn, vi, ve, dv, one)
+            if b == np.inf:
+                break
+            # consume the group equal to b
+            has1 = False
+            hu = False
+            hv = False
+            ku = 0
+            kv = 0
+            if not one and b == 1.0:
+                one = True
+                has1 = True
+            if ui < un and (uk + ui * us - ue) / du == b:
+                hu = True
+                ku = uk + ui * us
+                ui += 1
+            if vi < vn and (vk + vi * vs - ve) / dv == b:
+                hv = True
+                kv = vk + vi * vs
+                vi += 1
+            nxt = _peek(uk, us, un, ui, ue, du, vk, vs, vn, vi, ve, dv, one)
+            grouped = (1 if has1 else 0) + (1 if hu else 0) + (1 if hv else 0)
+            fb = ((grouped > 1 and not _group_ok(cell, r, c, has1, hu, ku, hv, kv))
+                  or b - ta <= lim or nxt - b <= lim or not math.isfinite(delta))
+            last = nxt == np.inf
+            tb = b
+            mid = (ta + tb) / 2
+            pr = math.floor(ve + mid * dv) + 1
+            pc = math.floor(ue + mid * du) + 1
+            skip_to = -1.0
+            if math.isfinite(delta):
+                for lev in range(nlev - 1, 0, -1):
+                    brr = pr >> lev
+                    bcc = pc >> lev
+                    h = shapes[lev, 0]
+                    w = shapes[lev, 1]
+                    if brr < 0 or bcc < 0 or brr >= h or bcc >= w:
+                        continue
+                    key = brr * w + bcc
+                    if failed[lev] == key:
+                        continue
+                    M = pyr[offs[lev] + key]
+                    tx = np.inf
+                    if du > 0:
+                        tx = min(tx, (((bcc + 1) << lev) - 1 - ue) / du)
+                    elif du < 0:
+                        tx = min(tx, ((bcc << lev) - 1 - ue) / du)
+                    if dv > 0:
+                        tx = min(tx, (((brr + 1) << lev) - 1 - ve) / dv)
+                    elif dv < 0:
+                        tx = min(tx, ((brr << lev) - 1 - ve) / dv)
+                    if tx <= tb:
+                        continue
+                    # exact gap on [ta - delta, tx + delta] >= line - M + curvature
+                    t1 = ta - delta
+                    t2 = tx + delta
+                    l1 = ze + t1 * dz
+                    l2 = ze + t2 * dz
+                    l1 -= e_ze_ + abs(t1) * e_dz + 3 * U * (abs(ze) + abs(t1 * dz))
+                    l2 -= e_ze_ + abs(t2) * e_dz + 3 * U * (abs(ze) + abs(t2 * dz))
+                    lo = min(l1, l2)
+                    if bend_lo >= 0:
+                        t0 = max(t1, 0.0)
+                        bl = bend_lo * t0 * t0 * (1 - 4 * U)
+                    else:
+                        bl = bend_lo * max(t1 * t1, t2 * t2) * (1 + 4 * U)
+                    lb = lo - M + bl
+                    if lb - 16 * U * (abs(lo) + abs(M) + abs(bl)) > 0:
+                        skip_to = tx
+                        break
+                    failed[lev] = key
+            if skip_to >= 0:
+                # drop every segment ending at or before skip_to. The new ta is the
+                # largest raw boundary <= skip_to; its predecessor (for the 16 delta
+                # rule) is the largest raw value below it, which is tb or one of the
+                # last two consumed on an axis, or 1; its group is whatever equals it.
+                ninf = -np.inf
+                j = _first_above(uk, us, un, ui, ue, du, skip_to)
+                u1 = (uk + (j - 1) * us - ue) / du if j > ui else ninf
+                u2 = (uk + (j - 2) * us - ue) / du if j - 2 >= ui else ninf
+                ku = uk + (j - 1) * us
+                jv = _first_above(vk, vs, vn, vi, ve, dv, skip_to)
+                v1 = (vk + (jv - 1) * vs - ve) / dv if jv > vi else ninf
+                v2 = (vk + (jv - 2) * vs - ve) / dv if jv - 2 >= vi else ninf
+                kv = vk + (jv - 1) * vs
+                one_now = (not one) and 1.0 <= skip_to
+                o1 = 1.0 if one_now else ninf
+                nta = max(tb, max(u1, max(v1, o1)))
+                ui = j
+                vi = jv
+                if one_now:
+                    one = True
+                if nta == tb:
+                    fa = fb
+                else:
+                    prev = tb
+                    for val in (u1, u2, v1, v2, o1):
+                        if val < nta and val > prev:
+                            prev = val
+                    hu = u1 == nta
+                    hv = v1 == nta
+                    has1 = o1 == nta
+                    nxt = _peek(uk, us, un, ui, ue, du, vk, vs, vn, vi, ve, dv, one)
+                    grouped = (1 if has1 else 0) + (1 if hu else 0) + (1 if hv else 0)
+                    fa = ((grouped > 1 and not _group_ok(cell, r, c, has1, hu, ku, hv, kv))
+                          or nta - prev <= lim or nxt - nta <= lim)
+                ta = nta
+                continue
+            if fa or fb:
+                state = 2
+            else:
+                st, r0, c0 = segment(cell, z, ta, tb, last)
+                if st == BLOCKING:
+                    state = 1
+                    have = True
+                    br0 = r0
+                    bc0 = c0
+                    break
+                if st == UNDECIDED:
+                    state = 2
+            ta = tb
+            fa = fb
+        out[i] = state
+
 
 
 def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
              max_distance=None, curvature=False, refraction=0.13, earth_radius=6371008.8,
-             prune=True, clearance=True):
+             clearance=True):
     """Same signature and result as oracle.viewshed: (visible, clearance, n_exact).
-    `prune` only changes the speed. With clearance=False the clearance comes back as
-    None and visibility and n_exact (unchanged) are computed much faster."""
+    With clearance=False the clearance comes back as None, visibility is unchanged,
+    and n_exact (cells this run decided exactly) can be lower."""
     z = np.ascontiguousarray(z, dtype=float)
     if transform[2] != 0 or transform[4] != 0 or abs(abs(transform[1]) - abs(transform[5])) > 0:
         raise ValueError("needs a north-up raster with square cells")
@@ -523,8 +587,9 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
         raise ValueError("there is no height data under the observer")
     ze = float(ground) + observer_height
     drop = oracle.drop_factor(curvature, refraction, earth_radius)
-    tol = 1e-9 * (1.0 + np.nanmax(np.abs(z)) + abs(ze))
     res = abs(transform[1])
+    rx = certify.Raster(transform, x, y, ground, observer_height, ue, ve, ze)
+    th = float(target_height)
 
     rr, cc = np.nonzero(~np.isnan(z))
     du, dv = cc - ue, rr - ve
@@ -537,35 +602,30 @@ def viewshed(z, transform, observer, observer_height=1.6, target_height=0.0,
         keep = ~(L * res > max_distance)
         rr, cc, L = rr[keep], cc[keep], L[keep]
     cells = np.stack([rr, cc], axis=1).astype(np.int64)
-    if not clearance:
-        pyr, offs, shapes = _pyramid(z)
-        state = np.empty(len(rr), np.int8)
-        _decide_pass(z, ue, ve, ze, float(target_height), drop, res, cells, state,
-                     pyr, offs, shapes, tol, tol)
-        blocked = state == 1
-        unsure = np.nonzero(state == 2)[0]
-        for k in unsure:
-            blocked[k] = _exact(z, transform, x, y, ground, observer_height, ue, ve, ze,
-                                float(target_height), drop, res, tol, int(rr[k]), int(cc[k]))
-        visible = np.zeros(z.shape, dtype=bool)
-        visible[rr, cc] = ~blocked
-        return visible, None, len(unsure)
-    mn = np.empty(len(rr))
-    far = np.empty(len(rr))
-    if prune:
-        pyr, offs, shapes = _pyramid(z)
-        _float_pass_pruned(z, ue, ve, ze, float(target_height), drop, res, cells, L, mn, far,
-                           pyr, offs, shapes, tol)
+    state = np.empty(len(rr), np.int8)
+    far = None
+    if clearance:
+        far = np.empty(len(rr))
+        _full_pass(z, ue, ve, ze, rx.e_ue, rx.e_ve, rx.e_ze, th, drop, res, cells, L, state, far)
     else:
-        _float_pass(z, ue, ve, ze, float(target_height), drop, res, 0.0, cells, L, mn, far)
+        pyr, offs, shapes = _pyramid(z)
+        _decide_pass(z, ue, ve, ze, rx.e_ue, rx.e_ve, rx.e_ze, th, drop, res, cells, state,
+                     pyr, offs, shapes)
 
-    visible = np.zeros(z.shape, dtype=bool)
-    clearance = np.full(z.shape, np.nan)
-    blocked = mn < -tol
-    unsure = np.nonzero(~(mn < -tol) & ~(mn > tol))[0]
+    blocked = state == 1
+    unsure = np.nonzero(state == 2)[0]
+    buf = np.empty((rows + cols + 8, 2), np.int64)
     for k in unsure:
-        blocked[k] = _exact(z, transform, x, y, ground, observer_height, ue, ve, ze,
-                                float(target_height), drop, res, tol, int(rr[k]), int(cc[k]))
+        r, c = int(rr[k]), int(cc[k])
+        n = _undecided_patches(z, ue, ve, ze, rx.e_ue, rx.e_ve, rx.e_ze, th, drop, res, r, c, buf)
+        patches = sorted({(int(a) + i, int(b) + j) for a, b in buf[:n]
+                          for i in (-1, 0, 1) for j in (-1, 0, 1)})
+        blocked[k] = blocked_exact_patches(z, transform, x, y, ground, observer_height,
+                                           r, c, target_height, drop, patches)
+    visible = np.zeros(z.shape, dtype=bool)
     visible[rr, cc] = ~blocked
-    clearance[rr, cc] = far
-    return visible, clearance, len(unsure)
+    clr = None
+    if clearance:
+        clr = np.full(z.shape, np.nan)
+        clr[rr, cc] = far
+    return visible, clr, len(unsure)

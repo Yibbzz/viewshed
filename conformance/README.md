@@ -33,36 +33,42 @@ smooth mathematical surface, and both are compared with true visibility on it
 - **`oracle.py`, exact bilinear oracle.** Line of sight on the surface model
   `viewshed` declares (cell-centre heights, bilinear between them). The sightline
   is split at every patch boundary, the gap to the surface in each patch is a
-  quadratic minimised in closed form, and near-ties are redone in exact rational
-  arithmetic. Gives visibility and clearance per cell. Results are cached in
-  `.cache/` by a hash of the inputs.
-- **`oracle_fast.py` and `oracle_numba.py`, the same oracle, faster.** Bit-identical
-  to `oracle.py`: the same visibility, the same clearance to the last bit, and the
-  same cells sent to exact arithmetic (`tests/test_oracle_fast.py`, which is
-  built around ties: integer heights, plateaus, observers on corners, no-data,
-  tiny earth radii). They get there by doing the same IEEE operations in the same
-  order: NumPy and numba (no fastmath, so no fused multiply-adds) round exactly as
-  CPython floats do. `oracle_fast.fastest()` picks numba when it is installed
-  (`pip install .[fast]`), and the adapters and `run.py` use it.
-  - `oracle_fast`: NumPy, every sightline's segments in one padded array. ~10x.
-  - `oracle_numba`: the reference's loops compiled and run in parallel, with
-    each sightline's boundaries merged rather than sorted. ~200x (121 x 121: 30 ms
-    against 6.9 s).
-  - `oracle_numba.viewshed(..., clearance=False)`: visibility only, which is all
-    a cell-for-cell check needs. The reference's decision only asks whether some
-    segment is below -tol, all are above +tol, or neither, so it can skip blocks
-    of patches whose lower bound on the gap (from a max-pyramid, widened by one
-    patch and kept `tol` clear of rounding) is above +tol, stop at the first
-    segment below -tol, generate boundaries as a stream so skips cost nothing, and
-    try the previous cell's blocker first. 1001 x 1001 in 0.2-0.6 s, against about
-    11 s for the full numba pass and an estimated hour for `oracle.py`.
-  - The exact fallback checks only the patches that can decide the tie: those
-    whose float minimum is within 1000 x tol of 0, plus their neighbours, each on
-    exactly the segment `oracle.py` uses (entry to exit crossing). `oracle.py`
-    trusts the float minimum beyond tol; this trusts it only beyond 1000 x tol, a
-    weaker version of the same assumption. It reads the raster lazily too
-    (`oracle.py` converts all of it to `Fraction`s per call: 1.8 s at 1001 x 1001).
-    Tie-heavy 301 x 301 rasters: 94 min -> 93 s for 57 of them.
+  quadratic minimised in closed form. Gives visibility and clearance per cell.
+  Results are cached in `.cache/` by a hash of the inputs.
+  - **Exact by construction (`certify.py`).** Each float segment is certified
+    blocking (its exact minimum is < 0) or clear, from rigorous bounds on how far
+    the floats can be from the exact model: IEEE error analysis (every operation
+    within 2^-53), the bilinear patch's exact Taylor expansion, per-raster input
+    errors measured exactly, per-cell ones with TwoSum. Where the float and exact
+    segment lists might not pair up (boundaries within 16 times their error bound,
+    unless TwoSum/TwoProduct prove them exactly equal, as on sightlines through
+    lattice points) nothing is certified. A cell with a certainly blocking segment
+    is blocked, one with every segment certainly clear is visible, and any other
+    is redone in exact rational arithmetic. This replaced a fixed tolerance (1e-9
+    of scale, an unproven margin) at no cost: on 1160 stress rasters the same
+    visibility and clearance, and 12913 exact checks against 12902.
+    `tests/test_certify.py` checks every certified segment against `Fraction`
+    arithmetic on rasters built to strain the bounds (projected coordinates,
+    0.1 m cells, big heights with tiny relief, ties, tiny earth radii).
+- **`oracle_numba.py`, the same oracle, compiled** (`pip install .[fast]`;
+  `oracle_fast.fastest()` picks it, else `oracle.py`, and the adapters and
+  `run.py` use it). numba compiles without fastmath (no reassociation, no fused
+  multiply-adds), so every operation rounds as CPython's floats do, and it compiles
+  `certify.py`'s own functions, so the certifier is the same code.
+  - `viewshed(...)`: the full pass, bit-identical to `oracle.py` (visibility,
+    clearance to the last bit, cells sent to exact arithmetic;
+    `tests/test_oracle_fast.py`, built around ties). 1001 x 1001: about 40 s.
+  - `viewshed(..., clearance=False)`: visibility only, which is all a
+    cell-for-cell check needs. Skips any block of patches on which a certified
+    lower bound on the exact gap (from a max-pyramid, widened by one patch) is
+    > 0, stops at the first certainly blocking segment, generates boundaries as a
+    stream so skips cost nothing, and tries the previous cell's blocker first.
+    Same visibility; its exact-check count can be lower (a skipped block is
+    certified whole). 1001 x 1001 in 0.3-1.0 s; `oracle.py` would take hours.
+  - A cell that needs exact arithmetic is checked exactly only on the patches it
+    is undecided on, plus neighbours (`oracle_fast.blocked_exact_patches`): every
+    other segment is certified clear, so this decides what checking the whole
+    sightline would. Tie-heavy 301 x 301 rasters: minutes, not hours.
 - **`oracle_rviewshed.py`, the r.viewshed model.** What GRASS `r.viewshed`
   actually computes, written from a description of the method (not GRASS's GPL
   code): each closer cell is reduced to three gradient samples (the two corners
@@ -123,9 +129,9 @@ many cells). The d²/(2R) drop is within 1 mm of a true sphere out to 35 km.
 - Faster clearance: the full numba pass still walks every segment, because the
   exact minimum gap rules out bounding against fixed thresholds (best-first
   branch and bound may help).
-- A rigorous float filter: tol (1e-9 of scale) is an engineering margin, not a
-  proven bound on the rounding error. A running error bound per segment would
-  make both filters provable.
+- Fewer exact checks with non-dyadic cell sizes: a float sightline lying exactly
+  on a grid line, whose exact twin may sit 1e-16 to either side, is left
+  undecided; certifying both neighbouring patches would settle it.
 
 `tests/test_rust_sweep.py` requires the Rust sweep to equal `oracle_rviewshed`
 on every cell of every dataset, scene and 40 random rasters (no-data, integer

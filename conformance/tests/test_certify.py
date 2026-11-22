@@ -25,8 +25,8 @@ def sightline_segments(z, transform, x, y, oh, th, drop, r, c):
     ground = oracle._ground_exact(z, transform, x, y)
     ze = float(ground) + oh
     res = abs(transform[1])
-    raster = certify.Raster(transform, x, y, ground, oh, ue, ve, ze)
-    cell = certify.Cell(raster, th, drop, res, z[r, c], r, c, certify.raster_slope(z))
+    rx = certify.Raster(transform, x, y, ground, oh, ue, ve, ze)
+    cell = certify.make_cell(ue, ve, ze, rx.e_ue, rx.e_ve, rx.e_ze, th, drop, res, z[r, c], r, c)
     ts, close = certify.boundaries(cell, r, c)
     out = []
     for i, (ta, tb) in enumerate(zip(ts, ts[1:])):
