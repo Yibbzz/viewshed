@@ -1073,7 +1073,7 @@ fn within(s: &Setup, r: i64, c: i64, max: f64) -> bool {
 const NEAR: f64 = 3.0; // patches nearer than this many cells stay with the walk
 const SECTORS: usize = 8; // horizon sectors per cell of raster width
 const SAMPLE: usize = 2048; // cells walked first to choose the mode
-const HORIZON_AT: f64 = 3.4; // sampled segments per cell from which the horizon pays (measured on 22 real-terrain runs)
+const HORIZON_AT: f64 = 3.0; // sampled segments per cell from which the horizon pays (60 real-terrain cases: rows wins below ~2.9, horizon from 3.1)
 const RING: f64 = 4.0; // ring width in cells
 const REL: f64 = 1e-12;
 
