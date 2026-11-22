@@ -70,8 +70,8 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} venv
           PY=$PWD/$([ "$RUNNER_OS" = Windows ] && echo venv/Scripts/python || echo venv/bin/python)
-          uv pip install --python "$PY" numpy pytest
-          uv pip install --python "$PY" --no-index --find-links wheels --no-deps viewshed
+          uv pip install --python venv numpy pytest
+          uv pip install --python venv --no-index --find-links wheels --no-deps viewshed
           "$PY" -c "import viewshed, sys; print(viewshed.__version__, viewshed.__file__)"
           cd python/tests && "$PY" -m pytest -q -p no:cacheprovider --import-mode=importlib .
 

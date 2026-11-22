@@ -45,7 +45,7 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python }} .venv
           PY=$([ "$RUNNER_OS" = Windows ] && echo .venv/Scripts/python || echo .venv/bin/python)
-          uv pip install --python "$PY" maturin pytest numpy
+          uv pip install --python .venv maturin pytest numpy
           VIRTUAL_ENV=$PWD/.venv "$PY" -m maturin develop --release
           echo "PY=$PWD/$PY" >> "$GITHUB_ENV"
       - name: Package tests

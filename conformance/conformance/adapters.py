@@ -172,12 +172,15 @@ class Rust(Adapter):
             np.ascontiguousarray(j.dem, "<f8").tofile(src)
             rows, cols = j.dem.shape
             md = -1.0 if j.max_distance is None else j.max_distance
-            p = subprocess.run([str(self._bin), str(src), str(rows), str(cols), repr(j.gt[0]),
-                                repr(j.gt[1]), repr(j.gt[3]), repr(j.observer[0]),
-                                repr(j.observer[1]), repr(j.observer_height), str(dst),
-                                repr(j.target_height), repr(md), self.surface,
-                                "1" if j.curvature else "0", repr(j.refraction),
-                                repr(j.earth_radius)],
+            # repr(float(x)): exact round-trip, and plain digits even for numpy
+            # scalars (numpy 2 reprs them as "np.float64(9.5)").
+            num = lambda x: repr(float(x))
+            p = subprocess.run([str(self._bin), str(src), str(rows), str(cols), num(j.gt[0]),
+                                num(j.gt[1]), num(j.gt[3]), num(j.observer[0]),
+                                num(j.observer[1]), num(j.observer_height), str(dst),
+                                num(j.target_height), num(md), self.surface,
+                                "1" if j.curvature else "0", num(j.refraction),
+                                num(j.earth_radius)],
                                check=True, capture_output=True, text=True)
             self.last_time = float(p.stdout)
             return np.fromfile(dst, np.uint8).reshape(rows, cols).astype(bool)
