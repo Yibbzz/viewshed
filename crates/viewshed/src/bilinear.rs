@@ -2454,8 +2454,167 @@ fn check_skips(cell: &Cell, s: &Setup, mid: &[(f64, f64)], straddle: &[(i64, i64
     }
 }
 
+// --- near-observer certificate (ported from the rotational sweep, research agent's
+// rot mode; validated there with near_blocker_jobs) ----------------------------------
+//
+// Per angular bin, an upper bound `ub` on the slope of every surface point within the
+// near radius (NEAR + 2 cells, the stretch the walk would cover from the observer) on
+// any ray of the bin. A target whose slope's lower bound is above it needs no walk near
+// the observer. Two parts:
+// (b) points closer than delta to the (exact) observer: the surface is continuous, so
+//     |B(X) - ground| <= G d / res (G: gradient bound of the patches within delta), and
+//     the eye is exactly `eye` above the ground, so sigma <= G/res - eye/d + |drop| d
+//     <= G/res - eye/delta + |drop| delta. Needs eye > 0 and data within delta.
+// (a) points at delta or more: bin_bounds_with's argument with the distance range
+//     clamped below at delta (less the position pad), which keeps its observer-error
+//     term finite.
+
+const NEAR_BINS: usize = 1024;
+
+struct NearTable {
+    ub: Vec<f64>,
+    scale: f64,
+}
+
+impl NearTable {
+    /// max of the bins' bounds over theta - widen ..= theta + widen
+    fn bound(&self, theta: f64, widen: f64) -> f64 {
+        let n = self.ub.len() as i64;
+        let ix = |t: f64| ((t + std::f64::consts::PI) * self.scale).floor() as i64;
+        (ix(theta - widen)..=ix(theta + widen))
+            .map(|k| self.ub[k.rem_euclid(n) as usize])
+            .fold(f64::NEG_INFINITY, f64::max)
+    }
+}
+
+/// Gradient bound of a patch polynomial on and around the patch (as bin_bounds_with).
+fn grad_bound(p: &Patch) -> f64 {
+    let e3 = (p.z00 - p.z01 - p.z10 + p.z11).abs();
+    (p.z01 - p.z00).abs().max((p.z11 - p.z10).abs()) + (p.z10 - p.z00).abs().max((p.z11 - p.z01).abs()) + 2.0 * e3
+}
+
+/// Upper bound on the slope of every point of patch `p` on a ray of `iv` at (exact)
+/// distance >= dclamp; -inf when no such point lies in the wedge. bin_bounds_with's
+/// upper bound with the near end of the distance range raised to dclamp - pad.
+fn ub_beyond(p: &Patch, s: &Setup, corner_angles: &[f64; 4], iv: &Interval, dclamp: f64) -> f64 {
+    let res = s.res;
+    let (ta, tb) = (iv.ta, iv.tb);
+    let (cth, sth) = iv.cs[2];
+    let (mut d1lo, mut d2hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut dirs = [(0.0f64, 0.0f64); 16];
+    dirs[..3].copy_from_slice(&iv.cs);
+    let mut n = 3;
+    let pi = std::f64::consts::PI;
+    let axes = [-pi, -0.5 * pi, 0.0, 0.5 * pi, pi];
+    for &a0 in corner_angles.iter().chain(axes.iter()) {
+        for wrap in [-2.0 * pi, 0.0, 2.0 * pi] {
+            if ta < a0 + wrap && a0 + wrap < tb && n < dirs.len() {
+                let t = a0 + wrap;
+                dirs[n] = (t.cos(), t.sin());
+                n += 1;
+            }
+        }
+    }
+    let mut any = false;
+    for &(ct, st) in &dirs[..n] {
+        if let Some((d1, d2)) = stretch_d(s, p.r0, p.c0, ct, st) {
+            any = true;
+            d1lo = d1lo.min(d1);
+            d2hi = d2hi.max(d2);
+        }
+    }
+    if !any {
+        return f64::NEG_INFINITY;
+    }
+    let g = grad_bound(p);
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let pad = 1e-9 * res + 2.0 * e_pos;
+    let slack = g * iv.tan_half * (1.0 + REL_B) / res;
+    let d_near = (d1lo * iv.cos_half - pad).max(dclamp - pad);
+    let d_far = d2hi / iv.cos_half + pad;
+    if d_far < d_near {
+        return f64::NEG_INFINITY; // nothing of the patch at dclamp or beyond in the wedge
+    }
+    if d_near <= 0.0 {
+        return f64::INFINITY;
+    }
+    let err_obs = (g * (e_pos / res) + s.e_ze) / d_near;
+    let (ub_v, size) = centre_max(p, s, cth, sth, d_near, d_far);
+    ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack)
+}
+
+fn near_table(grid: &Grid, s: &Setup, eye: f64) -> Option<NearTable> {
+    if eye.is_nan() || eye <= 0.0 {
+        return None;
+    }
+    let (rows, cols) = (grid.rows as i64, grid.cols as i64);
+    let res = s.res;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let reach = |d: f64| -> Vec<(i64, i64)> {
+        let k = (d / res).ceil() as i64 + 2;
+        let (cu, cv) = (s.ue.floor() as i64, s.ve.floor() as i64);
+        let mut v = Vec::new();
+        for r0 in (cv - k).max(-1)..=(cv + k).min(rows - 1) {
+            for c0 in (cu - k).max(-1)..=(cu + k).min(cols - 1) {
+                if patch_dmin(s, r0, c0) < d + 2.0 * e_pos + 1e-9 * res {
+                    v.push((r0, c0));
+                }
+            }
+        }
+        v
+    };
+    // (b): delta from the gradient near the observer (no data within it: no certificate)
+    let probe = reach(0.5 * res);
+    let mut gmax = 0.0f64;
+    for &(r0, c0) in &probe {
+        let p = corners(grid, r0, c0);
+        if nodata(&p) {
+            return None;
+        }
+        gmax = gmax.max(grad_bound(&p));
+    }
+    let drop = s.drop.abs();
+    let delta = (0.25 * res).min(eye / (gmax / res + drop * res + 20.0));
+    for &(r0, c0) in &reach(delta) {
+        let p = corners(grid, r0, c0);
+        if nodata(&p) {
+            return None;
+        }
+        debug_assert!(grad_bound(&p) <= gmax);
+    }
+    let m = 1e-9;
+    let ub_b = (gmax / res) * (1.0 + m) - (eye / delta) * (1.0 - m) + drop * delta * (1.0 + m) + 1e-300;
+    // (a): every patch with data within the near radius, every bin
+    let near: Vec<(Patch, [f64; 4])> = reach((NEAR + 2.0) * res + res)
+        .into_iter()
+        .filter_map(|(r0, c0)| {
+            let p = corners(grid, r0, c0);
+            if nodata(&p) {
+                return None;
+            }
+            let mut ca = [0.0f64; 4];
+            for (i, (a_, b_)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
+                ca[i] = (p.r0 + b_ - s.ve).atan2(p.c0 + a_ - s.ue);
+            }
+            Some((p, ca))
+        })
+        .collect();
+    let scale = NEAR_BINS as f64 / (2.0 * std::f64::consts::PI);
+    let edge = |k: usize| k as f64 / scale - std::f64::consts::PI;
+    let ub: Vec<f64> = (0..NEAR_BINS)
+        .into_par_iter()
+        .map(|k| {
+            let iv = Interval::new(edge(k), edge(k + 1));
+            near.iter()
+                .map(|(p, ca)| ub_beyond(p, s, ca, &iv, delta))
+                .fold(ub_b, f64::max)
+        })
+        .collect();
+    Some(NearTable { ub, scale })
+}
+
 /// The cells by the sector-parallel horizon (VIEWSHED_MODE=sector).
-fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
+fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool], eye: f64) {
     use std::f64::consts::PI;
     let mut lap = Lap::new();
     let (rows, cols) = (grid.rows, grid.cols);
@@ -2596,6 +2755,10 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         }
         u
     };
+    // per direction: a bound on every surface point near the observer (tighter than
+    // u_near, which is one bound for all directions); VIEWSHED_NONEAR (tests) turns it off
+    let near_tab = if std::env::var("VIEWSHED_NONEAR").is_ok() { None } else { near_table(grid, s, eye) };
+    let near_tab = &near_tab;
     let isr = &is_target;
     // per sector: decided cells, undecided cells (settled after), CPU seconds
     type SectorOut = (Vec<(usize, bool)>, Vec<usize>, f64);
@@ -2700,7 +2863,8 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                             }
                             Verdict::Clear(straddle) => {
                                 // above u_near: the near patches can't block it either
-                                let t_a = if lo > u_near { 0.0 } else { (NEAR * res + 2.0 * res) / dist };
+                                let clear_near = lo > u_near || near_tab.as_ref().is_some_and(|nt| nt.bound(theta, widen) < lo);
+                                let t_a = if clear_near { 0.0 } else { (NEAR * res + 2.0 * res) / dist };
                                 // a sightline point at distance x lies in a patch reaching at
                                 // most x + sqrt(2) cells; the walk's crossings are off by at
                                 // most delta in t (delta * dist <= 0.25 cells: target_slope)
@@ -2839,7 +3003,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     let fits = (rows as u64 + 1) * (cols as u64 + 1) < (1u64 << 40)
         && ((((rows * rows + cols * cols) as f64).sqrt() / RING) as u64 + 4) < (1u64 << 24);
     if mode == Mode::Sector && fits {
-        sector_phase(grid, &s, &pyr, &cells, &mut seen);
+        sector_phase(grid, &s, &pyr, &cells, &mut seen, opts.observer_height);
     } else if mode == Mode::Horizon && fits {
         horizon_phase(grid, &s, &pyr, &cells, &mut seen);
     } else {
