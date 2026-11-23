@@ -1258,6 +1258,17 @@ impl Angles {
         Angles { data, w }
     }
 
+    /// The direction to vertex (r, c) (a cell centre), r in -1..=rows, c in -1..=cols:
+    /// the same value as (r - ve).atan2(c - ue), the direction of target cell (r, c).
+    #[inline]
+    fn vertex(&self, r: i64, c: i64) -> Option<f64> {
+        let h = (self.data.len() / self.w) as i64;
+        if r < -1 || c < -1 || r + 1 >= h || c + 1 >= self.w as i64 {
+            return None;
+        }
+        Some(self.data[(r + 1) as usize * self.w + (c + 1) as usize])
+    }
+
     /// The four corners of patch (r0, c0), in the order (0, 0), (1, 0), (0, 1), (1, 1)
     /// of (column offset, row offset).
     #[inline]
@@ -1344,6 +1355,11 @@ impl Lap {
 /// Bounds on the target's slope (z_t + th - drop D^2 - ze*) / D, its direction, and
 /// the direction's error margin; None when delta makes the stretch bounds unsafe.
 fn target_slope(s: &Setup, cell: &Cell, zt: f64) -> Option<(f64, f64, f64, f64, f64)> {
+    target_slope_th(s, cell, zt, cell.dv.atan2(cell.du))
+}
+
+/// target_slope with the target's direction `theta` (= cell.dv.atan2(cell.du)) given.
+fn target_slope_th(s: &Setup, cell: &Cell, zt: f64, theta: f64) -> Option<(f64, f64, f64, f64, f64)> {
     let res = s.res;
     let e_pos = (s.e_ue + s.e_ve) * res;
     let dist = (cell.du * cell.du + cell.dv * cell.dv).sqrt() * res;
@@ -1367,7 +1383,6 @@ fn target_slope(s: &Setup, cell: &Cell, zt: f64) -> Option<(f64, f64, f64, f64, 
         let v = if n >= 0.0 { n / d_lo } else { n / d_hi };
         v + REL * v.abs()
     };
-    let theta = cell.dv.atan2(cell.du);
     let widen = 1e-9 + 8.0 * e_pos / d_lo;
     Some((lo, hi, theta, widen, dist))
 }
@@ -2344,7 +2359,7 @@ impl SBins {
 
 /// A culling block's slope bound and angular span (atan2 coordinates), or None when it
 /// can't be culled (no-data, too near). As in block_culled.
-fn block_bound(grid: &Grid, s: &Setup, r0: usize, c0: usize) -> Option<(f64, f64, f64)> {
+fn block_bound(grid: &Grid, s: &Setup, ang: &Angles, r0: usize, c0: usize) -> Option<(f64, f64, f64)> {
     let kb = CULL_BLOCK;
     let (rows, cols) = (grid.rows, grid.cols);
     let mut hmax = f64::NEG_INFINITY;
@@ -2368,16 +2383,23 @@ fn block_bound(grid: &Grid, s: &Setup, r0: usize, c0: usize) -> Option<(f64, f64
     }
     let d_hi = far_corner(u0, u1, v0, v1) * res * (1.0 + REL) + 2.0 * e_pos;
     let smax = slope_hi(hmax + s.th.max(0.0), s.ze - s.e_ze, s.drop, d_lo, d_hi);
-    let (lo, hi) = square_span(s, r0, c0, kb);
+    let (lo, hi) = square_span_tab(s, ang, r0, c0, kb);
     let w = 1e-9 + 8.0 * e_pos / d_lo;
     Some((smax, lo - w, hi + w))
 }
 
 /// Angular span (atan2 coordinates, lo may be below -pi) of the square [c0, c0 + k] x
-/// [r0, r0 + k] seen from the observer (not containing it).
-fn square_span(s: &Setup, r0: usize, c0: usize, k: usize) -> (f64, f64) {
+/// [r0, r0 + k] seen from the observer (not containing it); corner directions from the
+/// vertex table where it has them (the same values as atan2 on the spot).
+fn square_span_tab(s: &Setup, ang: &Angles, r0: usize, c0: usize, k: usize) -> (f64, f64) {
     let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + k) as f64 - s.ue, r0 as f64 - s.ve, (r0 + k) as f64 - s.ve);
-    let ca = [v0.atan2(u0), v0.atan2(u1), v1.atan2(u0), v1.atan2(u1)];
+    let (r0i, c0i, ki) = (r0 as i64, c0 as i64, k as i64);
+    let ca = [
+        ang.vertex(r0i, c0i).unwrap_or_else(|| v0.atan2(u0)),
+        ang.vertex(r0i, c0i + ki).unwrap_or_else(|| v0.atan2(u1)),
+        ang.vertex(r0i + ki, c0i).unwrap_or_else(|| v1.atan2(u0)),
+        ang.vertex(r0i + ki, c0i + ki).unwrap_or_else(|| v1.atan2(u1)),
+    ];
     let centre = ca[0];
     let (mut alo, mut ahi) = (0.0f64, 0.0f64);
     for &a in &ca[1..] {
@@ -2392,6 +2414,7 @@ fn square_span(s: &Setup, r0: usize, c0: usize, k: usize) -> (f64, f64) {
     }
     (centre + alo, centre + ahi)
 }
+
 
 /// VIEWSHED_CHECK: every patch the skipped stretches `mid` cross is covered (in the
 /// bins or a culled block), a straddler (walked) or, when the target is above u_near
@@ -2483,8 +2506,10 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         (v, inside)
     };
     // blocks routed to sectors, by ring (nearest point less a hair)
-    let mut sblocks: Vec<Vec<Vec<(usize, usize, bool)>>> = (0..nsec).map(|_| (0..n_rings).map(|_| Vec::new()).collect()).collect();
-    type Routed = (usize, usize, usize, Vec<usize>, bool);
+    type SBlock = (usize, usize, Option<(f64, f64, f64)>);
+    let mut sblocks: Vec<Vec<Vec<SBlock>>> = (0..nsec).map(|_| (0..n_rings).map(|_| Vec::new()).collect()).collect();
+    type Routed = (usize, usize, usize, Vec<usize>, bool, Option<(f64, f64, f64)>);
+    let angr = &ang;
     let routed: Vec<Routed> = (0..rows)
         .into_par_iter()
         .step_by(kb)
@@ -2498,16 +2523,16 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                 let (secs, inside) = if dx == 0.0 && dy == 0.0 {
                     ((0..nsec).collect(), false)
                 } else {
-                    let (lo, hi) = square_span(s, r0, c0, kb);
+                    let (lo, hi) = square_span_tab(s, angr, r0, c0, kb);
                     sectors_of(lo - 1e-9, hi + 1e-9)
                 };
-                (r0, c0, ring, secs, inside)
+                (r0, c0, ring, secs, inside, block_bound(grid, s, angr, r0, c0))
             })
         })
         .collect();
-    for (r0, c0, ring, secs, inside) in routed {
+    for (r0, c0, ring, secs, _, bb) in routed {
         for k in secs {
-            sblocks[k][ring].push((r0, c0, inside));
+            sblocks[k][ring].push((r0, c0, bb));
         }
     }
     // patches on the -1 row and column belong to no block: route by span
@@ -2612,8 +2637,8 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                         }
                     }
                 }
-                for &(r0, c0, _) in &sblocks[k][ring] {
-                    if let Some((smax, lo, hi)) = block_bound(grid, s, r0, c0) {
+                for &(r0, c0, bb) in &sblocks[k][ring] {
+                    if let Some((smax, lo, hi)) = bb {
                         // the span in this sector's coordinates (the copy that meets it)
                         let l = to_sec(lo);
                         let l = if l > b { l - 2.0 * PI } else { l };
@@ -2633,7 +2658,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                             let i = r * cols + c;
                             if isr[i] {
                                 let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
-                                let th = dv.atan2(du);
+                                let th = ang.vertex(r as i64, c as i64).unwrap_or_else(|| dv.atan2(du));
                                 if sec_of(th) == k {
                                     let d = (du * du + dv * dv).sqrt();
                                     let cr = ((d / rw).floor() as usize).min(last).max(ring);
@@ -2663,7 +2688,8 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                     }
                     let mut mid = Vec::new();
                     let mut tail_only = false;
-                    if let Some((lo, hi, theta, widen, dist)) = target_slope(s, &cell, zt) {
+                    let th = ang.vertex(r, c).unwrap_or_else(|| cell.dv.atan2(cell.du));
+                    if let Some((lo, hi, theta, widen, dist)) = target_slope_th(s, &cell, zt, th) {
                         if check {
                             assert!(max_far < dist, "VIEWSHED_CHECK: a patch reaching {max_far} is in the bins before target ({r}, {c}) at {dist}");
                         }
