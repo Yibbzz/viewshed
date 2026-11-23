@@ -1175,6 +1175,7 @@ const SECTORS: usize = 8; // horizon sectors per cell of raster width
 const SAMPLE: usize = 2048; // cells walked first to choose the mode
 const HORIZON_AT: f64 = 3.0; // sampled segments per cell from which the horizon pays (219 real-terrain cases, incl. hydro-flattened lakes and observers from map coordinates: total-optimal at 3.0)
 const RING: f64 = 4.0; // ring width in cells
+const TURN: u64 = 1 << 40; // direction steps per turn in the cells' sort key
 const REL: f64 = 1e-12;
 
 /// A patch ready for the horizon: its nearest distance (a lower bound), its angular
@@ -1206,9 +1207,39 @@ fn patch_dmin(s: &Setup, r0: i64, c0: i64) -> f64 {
     (dx * dx + dy * dy).sqrt() * s.res
 }
 
+/// The direction (atan2 of v, u) from the observer to every grid vertex (r, c), r in
+/// -1..=rows, c in -1..=cols: computed once, shared by the four patches around each
+/// vertex (the same formula as computing it per patch, so the same values).
+struct Angles {
+    data: Vec<f64>,
+    w: usize,
+}
+
+impl Angles {
+    fn new(s: &Setup, rows: usize, cols: usize) -> Angles {
+        let (h, w) = (rows + 2, cols + 2);
+        let mut data = vec![0.0f64; h * w];
+        data.par_chunks_mut(w).enumerate().for_each(|(i, row)| {
+            let v = (i as i64 - 1) as f64 - s.ve;
+            for (j, a) in row.iter_mut().enumerate() {
+                *a = v.atan2((j as i64 - 1) as f64 - s.ue);
+            }
+        });
+        Angles { data, w }
+    }
+
+    /// The four corners of patch (r0, c0), in the order (0, 0), (1, 0), (0, 1), (1, 1)
+    /// of (column offset, row offset).
+    #[inline]
+    fn patch(&self, r0: i64, c0: i64) -> [f64; 4] {
+        let i = (r0 + 1) as usize * self.w + (c0 + 1) as usize;
+        [self.data[i], self.data[i + 1], self.data[i + self.w], self.data[i + self.w + 1]]
+    }
+}
+
 /// The horizon record of patch (r0, c0) (nearest distance `d0` from patch_dmin), or
 /// None for a patch without data.
-fn prepare_patch(grid: &Grid, s: &Setup, r0: i64, c0: i64, d0: f64) -> Option<HPatch> {
+fn prepare_patch(grid: &Grid, s: &Setup, ang: &Angles, r0: i64, c0: i64, d0: f64) -> Option<HPatch> {
     let p = corners(grid, r0, c0);
     if nodata(&p) {
         return None;
@@ -1217,12 +1248,15 @@ fn prepare_patch(grid: &Grid, s: &Setup, r0: i64, c0: i64, d0: f64) -> Option<HP
     let e_pos = (s.e_ue + s.e_ve) * res;
     let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + 1) as f64 - s.ue, r0 as f64 - s.ve, (r0 + 1) as f64 - s.ve);
     let dmin = d0 * (1.0 - REL) - 2.0 * e_pos;
-    let mut dmax: f64 = 0.0;
-    let centre = ((v0 + v1) / 2.0).atan2((u0 + u1) / 2.0);
+    // the farthest corner: rounding is monotone, so this is the largest of the four
+    let dmax = far_corner(u0, u1, v0, v1);
+    // the corners' directions relative to corner (0, 0), wrapped: the patch is NEAR
+    // cells away or more, so its span is far below pi
+    let ca = ang.patch(r0, c0);
+    let centre = ca[0];
     let (mut alo, mut ahi) = (0.0f64, 0.0f64);
-    for (u, v) in [(u0, v0), (u1, v0), (u0, v1), (u1, v1)] {
-        dmax = dmax.max((u * u + v * v).sqrt());
-        let mut a = v.atan2(u) - centre;
+    for &a in &ca[1..] {
+        let mut a = a - centre;
         if a > std::f64::consts::PI {
             a -= 2.0 * std::f64::consts::PI;
         } else if a < -std::f64::consts::PI {
@@ -1243,19 +1277,42 @@ fn prepare_patch(grid: &Grid, s: &Setup, r0: i64, c0: i64, d0: f64) -> Option<HP
     })
 }
 
+/// The distance to the farthest of a patch's corners (u0..u1 by v0..v1, cells from the
+/// observer): the same value as the largest of the four corner distances, since
+/// squaring, adding and sqrt are monotone in rounding.
+fn far_corner(u0: f64, u1: f64, v0: f64, v1: f64) -> f64 {
+    let (u, v) = (u0.abs().max(u1.abs()), v0.abs().max(v1.abs()));
+    (u * u + v * v).sqrt()
+}
+
 /// The ring before which something at distance d (map units) must be inserted: the
 /// first ring k with d < (k RING - 1) res.
 fn ring_of(d: f64, res: f64) -> usize {
     ((d / res + 1.0) / RING).floor() as usize + 1
 }
 
-/// Group items by a small integer key, keeping nothing else in order (counting sort).
-fn bucket<T: Copy + Send>(items: &[(usize, T)], n: usize) -> Vec<Vec<T>> {
-    let mut out: Vec<Vec<T>> = (0..n).map(|_| Vec::new()).collect();
-    for &(k, v) in items {
-        out[k.min(n - 1)].push(v);
+/// Where each ring starts in a slice sorted by ring (n + 1 offsets).
+fn ring_starts<T>(sorted: &[T], n: usize, key: impl Fn(&T) -> u32) -> Vec<usize> {
+    (0..=n).map(|k| sorted.partition_point(|x| (key(x) as usize) < k)).collect()
+}
+
+/// Phase timing for VIEWSHED_DEBUG (stderr): each `lap` prints the time since the last.
+struct Lap {
+    on: bool,
+    t: std::time::Instant,
+}
+
+impl Lap {
+    fn new() -> Lap {
+        Lap { on: std::env::var("VIEWSHED_DEBUG").is_ok(), t: std::time::Instant::now() }
     }
-    out
+
+    fn lap(&mut self, name: &str) {
+        if self.on {
+            eprintln!("phase {name} {:.3}s", self.t.elapsed().as_secs_f64());
+            self.t = std::time::Instant::now();
+        }
+    }
 }
 
 /// Bounds on the target's slope (z_t + th - drop D^2 - ze*) / D, its direction, and
@@ -1568,7 +1625,7 @@ impl Bins {
     /// Insert a ring's patches, in parallel over chunks of bins: each chunk takes the
     /// patches whose span meets it (bins are independent, so no two threads touch the
     /// same bin).
-    fn insert_all(&mut self, grid: &Grid, s: &Setup, patches: &[(i64, i64, HPatch)]) {
+    fn insert_all(&mut self, grid: &Grid, s: &Setup, ang: &Angles, patches: &[(i64, i64, HPatch)]) {
         let chunk = 256usize.min(self.n);
         let n = self.n as i64;
         let nchunks = self.n / chunk;
@@ -1607,13 +1664,7 @@ impl Bins {
                         if hp.slope <= low[li] {
                             continue; // the crude whole-patch bound can't beat this bin
                         }
-                        let ca = *angles.get_or_insert_with(|| {
-                            let mut ca = [0.0f64; 4];
-                            for (q, (a_, b_)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
-                                ca[q] = (p.r0 + b_ - s.ve).atan2(p.c0 + a_ - s.ue);
-                            }
-                            ca
-                        });
+                        let ca = *angles.get_or_insert_with(|| ang.patch(*r0, *c0));
                         // a span wrapping past +-pi has k outside 0..n: its edges are
                         // shifted by 2 pi, so compute them as such (as always)
                         let iv = if k == i { table[i as usize] } else { Interval::new(edge(k), edge(k + 1)) };
@@ -1741,27 +1792,36 @@ fn skip_intervals(cell: &Cell, s: &Setup, t_a: f64, t_b: f64, holes: &[(i64, i64
 
 /// The deferred cells with the horizon filters, in rings of increasing distance.
 fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
+    let mut lap = Lap::new();
     let (rows, cols) = (grid.rows, grid.cols);
     let nlev = pyr.shapes.len();
     let res = s.res;
-    // the cells by ring, each ring by angle
-    let keyed: Vec<(usize, (f64, i64, i64))> = cells
+    // the cells by ring, each ring by angle: one flat array, sorted, cut at the rings
+    let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / RING) as usize + 4;
+    let last = (n_rings - 1) as u32;
+    // key: ring, then the direction in 2^40 steps per turn (the order within a ring
+    // only affects speed, never a result)
+    let mut keyed: Vec<(u64, usize)> = cells
         .par_iter()
         .map(|&(r, c)| {
             let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
             let d = (du * du + dv * dv).sqrt();
-            ((d / RING).floor() as usize, (dv.atan2(du), r, c))
+            let ring = ((d / RING).floor() as u64).min(last as u64);
+            let q = ((dv.atan2(du) + std::f64::consts::PI) * (TURN as f64 / (2.0 * std::f64::consts::PI))) as u64;
+            ((ring << 40) | q.min(TURN - 1), r as usize * cols + c as usize)
         })
         .collect();
-    let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / RING) as usize + 4;
-    let mut rings = bucket(&keyed, n_rings);
-    rings.par_iter_mut().for_each(|ring| ring.sort_unstable_by(|a, b| a.0.total_cmp(&b.0)));
+    keyed.par_sort_unstable();
+    let ring_at = ring_starts(&keyed, n_rings, |k| (k.0 >> 40) as u32);
+    lap.lap("h:rings");
     // every patch, by the ring before which it lies entirely inside the processed
     // radius (by its farthest point), so the bins only ever hold terrain nearer than
     // every target they are asked about; prepared lazily
     let (rows_i, cols_i) = (rows as i64, cols as i64);
     let near = NEAR * res;
-    let pkeys: Vec<(usize, (i64, i64, f64))> = (-1..rows_i)
+    // key: ring, then the patch's row-major index (as generated)
+    let pw = (cols + 1) as u64;
+    let mut pkeys: Vec<u64> = (-1..rows_i)
         .into_par_iter()
         .flat_map_iter(|r0| {
             (-1..cols_i).filter_map(move |c0| {
@@ -1769,39 +1829,53 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                 if d0 < near {
                     return None;
                 }
-                let mut far: f64 = 0.0;
-                for (a, b) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
-                    let (u, v) = (c0 as f64 + a - s.ue, r0 as f64 + b - s.ve);
-                    far = far.max((u * u + v * v).sqrt());
-                }
+                let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
                 let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
-                Some((ring_of(far, res), (r0, c0, d0)))
+                let ring = ring_of(far, res).min(n_rings - 1) as u64;
+                Some((ring << 40) | ((r0 + 1) as u64 * pw + (c0 + 1) as u64))
             })
         })
         .collect();
-    let pbuckets = bucket(&pkeys, n_rings);
+    pkeys.par_sort_unstable();
+    let patch_at = ring_starts(&pkeys, n_rings, |k| (k >> 40) as u32);
+    lap.lap("h:patch-keys");
     let mut bins = Bins::new(SECTORS * rows.max(cols));
+    let ang = Angles::new(s, rows, cols);
+    lap.lap("h:bins-new+angles");
+    let (mut t_prep, mut t_ins, mut t_q) = (0.0f64, 0.0f64, 0.0f64);
     for ring in 0..n_rings {
         // every patch entirely nearer than the ring's inner edge (less a cell)
         let inserted = ((ring as f64) * RING - 1.0) * res;
-        if !pbuckets[ring].is_empty() {
-            let prepared: Vec<(i64, i64, HPatch)> = pbuckets[ring]
+        let pring = &pkeys[patch_at[ring]..patch_at[ring + 1]];
+        if !pring.is_empty() {
+            let t0 = std::time::Instant::now();
+            let prepared: Vec<(i64, i64, HPatch)> = pring
                 .par_iter()
-                .filter_map(|&(r0, c0, d0)| prepare_patch(grid, s, r0, c0, d0).map(|hp| (r0, c0, hp)))
+                .filter_map(|&k| {
+                    let i = k & ((1u64 << 40) - 1);
+                    let (r0, c0) = ((i / pw) as i64 - 1, (i % pw) as i64 - 1);
+                    prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)).map(|hp| (r0, c0, hp))
+                })
                 .collect();
-            bins.insert_all(grid, s, &prepared);
+            t_prep += t0.elapsed().as_secs_f64();
+            let t0 = std::time::Instant::now();
+            bins.insert_all(grid, s, &ang, &prepared);
+            t_ins += t0.elapsed().as_secs_f64();
         }
-        if rings[ring].is_empty() {
+        let cring = &keyed[ring_at[ring]..ring_at[ring + 1]];
+        if cring.is_empty() {
             continue;
         }
         let h = &bins;
-        let results: Vec<(usize, bool)> = rings[ring]
+        let t0 = std::time::Instant::now();
+        let results: Vec<(usize, bool)> = cring
             .par_chunks(64)
             .flat_map_iter(|chunk| {
                 let mut failed = vec![-1i64; nlev];
                 let mut blocker: Option<(i64, i64)> = None;
                 let mut out = Vec::with_capacity(chunk.len());
-                for &(_, r, c) in chunk {
+                for &(_, i) in chunk {
+                    let (r, c) = ((i / cols) as i64, (i % cols) as i64);
                     let zt = grid.at(r as usize, c as usize);
                     let cell = make_cell(s, zt, r, c);
                     let idx = r as usize * cols + c as usize;
@@ -1846,16 +1920,22 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                 out.into_iter()
             })
             .collect();
+        t_q += t0.elapsed().as_secs_f64();
         for (k, v) in results {
             seen[k] = v;
         }
     }
+    if lap.on {
+        eprintln!("phase h:prepare {t_prep:.3}s h:insert {t_ins:.3}s h:queries {t_q:.3}s");
+    }
+    lap.lap("h:ring-loop");
 }
 
 pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
     if !grid.inside(x, y) {
         return Err(Error::ObserverOutside);
     }
+    let mut lap = Lap::new();
     let t = grid.transform;
     let half = BigRational::new(BigInt::from(1), BigInt::from(2));
     let ue_x = (rat(x) - rat(t[0])) / rat(t[1]) - &half;
@@ -1878,6 +1958,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
         ve_x,
         ze_x,
     };
+    lap.lap("observer");
     let (rows, cols) = (grid.rows, grid.cols);
     let mut cells: Vec<(i64, i64)> = Vec::with_capacity(rows * cols);
     for r in 0..rows {
@@ -1893,8 +1974,10 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
             cells.push((r as i64, c as i64));
         }
     }
+    lap.lap("cells");
     let pyr = Pyramid::new(grid);
     let nlev = pyr.shapes.len();
+    lap.lap("pyramid");
     // Two exact ways through the cells: row-major chunks (neighbouring sightlines
     // share blockers, cache lines and pyramid blocks; best when sightlines are cheap)
     // or rings with the horizon filters (pays when many sightlines run close to the
@@ -1944,7 +2027,11 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     } else {
         false
     };
-    if use_horizon {
+    lap.lap("sample");
+    // the horizon's sort keys pack a ring (24 bits) above a patch index (40 bits)
+    let fits = (rows as u64 + 1) * (cols as u64 + 1) < (1u64 << 40)
+        && ((((rows * rows + cols * cols) as f64).sqrt() / RING) as u64 + 4) < (1u64 << 24);
+    if use_horizon && fits {
         horizon_phase(grid, &s, &pyr, &cells, &mut seen);
     } else {
         let decided: Vec<(usize, bool)> = cells
@@ -1978,6 +2065,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
         for (idx, v) in decided {
             seen[idx] = v;
         }
+        lap.lap("rows");
     }
     Ok(seen)
 }
