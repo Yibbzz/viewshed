@@ -25,9 +25,11 @@
 //! from the closed form of a bilinear patch's horizon (sigma = alpha d + beta + gamma/d
 //! along a ray). A target is decided by its bin, or by its candidates at its own
 //! direction; the walk then only covers the stretches near the observer and the
-//! target, and any straddling candidate. A sample of cells, walked first, picks the
-//! mode: the horizon pays when many sightlines run close to the terrain (hilltops,
-//! masts, open ground).
+//! target, and any straddling candidate. Hidden-block culling: as each ring starts,
+//! every 4 x 4 block of cells whose nearest point lies in it is tested against the
+//! bins; a block certainly below them is hidden, and its patches can never be horizon,
+//! so they are never prepared or inserted (only surviving terrain is keyed and
+//! sorted). Large rasters take the rings, small ones the row-major walk.
 //!
 //! This follows the conformance suite's `certify.py` and `oracle_numba.py`, which
 //! hold the method to the plain exact oracle (`oracle.py`) cell for cell.
@@ -1172,8 +1174,11 @@ fn within(s: &Setup, r: i64, c: i64, max: f64) -> bool {
 
 const NEAR: f64 = 3.0; // patches nearer than this many cells stay with the walk
 const SECTORS: usize = 8; // horizon sectors per cell of raster width
-const SAMPLE: usize = 2048; // cells walked first to choose the mode
-const HORIZON_AT: f64 = 3.0; // sampled segments per cell from which the horizon pays (219 real-terrain cases, incl. hydro-flattened lakes and observers from map coordinates: total-optimal at 3.0)
+// Rasters with at least this many target cells take the horizon mode: with hidden-block
+// culling it is within 2% of the better mode in total over 219 real-terrain cases (lake
+// windows and observers from map coordinates included) and at most 1.9x slower on any;
+// the row-major walk was 2.6x slower in total. Smaller rasters take the walk.
+const HORIZON_MIN: usize = 32_768;
 const RING: f64 = 4.0; // ring width in cells
 const TURN: u64 = 1 << 40; // direction steps per turn in the cells' sort key
 const REL: f64 = 1e-12;
@@ -2085,9 +2090,8 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     let nlev = pyr.shapes.len();
     lap.lap("pyramid");
     // Two exact ways through the cells: row-major chunks (neighbouring sightlines
-    // share blockers, cache lines and pyramid blocks; best when sightlines are cheap)
-    // or rings with the horizon filters (pays when many sightlines run close to the
-    // terrain). A sample of cells, walked first, picks one.
+    // share blockers, cache lines and pyramid blocks) for small rasters, or rings with
+    // the horizon filters and hidden-block culling (HORIZON_MIN).
     let mut seen = vec![false; rows * cols];
     // VIEWSHED_MODE=rows|horizon forces a mode (the conformance tests run both)
     let forced = match std::env::var("VIEWSHED_MODE").as_deref() {
@@ -2095,45 +2099,8 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
         Ok("horizon") => Some(true),
         _ => None,
     };
-    let use_horizon = if let Some(f) = forced {
-        f
-    } else if cells.len() >= 16 * SAMPLE {
-        // runs of consecutive cells, walked as the row-major pass walks them (with
-        // blocker reuse), so the count predicts that pass's cost
-        let runs = 16;
-        let len = SAMPLE / runs;
-        let stride = cells.len() / runs;
-        let work: usize = (0..runs)
-            .into_par_iter()
-            .map(|k| {
-                let mut failed = vec![-1i64; nlev];
-                let mut blocker: Option<(i64, i64)> = None;
-                let mut n = 0;
-                for &(r, c) in &cells[k * stride..k * stride + len] {
-                    let cell = make_cell(&s, grid.at(r as usize, c as usize), r, c);
-                    n += 1;
-                    if let Some((br, bc)) = blocker {
-                        if reuse_blocks(&cell, grid, br, bc) {
-                            continue;
-                        }
-                    }
-                    let (st, r0, c0) = walk(&cell, grid, &pyr, r, c, &mut failed, &[], &mut n);
-                    if st == State::Blocking {
-                        blocker = Some((r0, c0));
-                    }
-                }
-                n
-            })
-            .sum();
-        let mean = work as f64 / SAMPLE as f64;
-        if std::env::var("VIEWSHED_DEBUG").is_ok() {
-            eprintln!("sampled segments per cell {mean:.2}");
-        }
-        mean >= HORIZON_AT
-    } else {
-        false
-    };
-    lap.lap("sample");
+    let use_horizon = forced.unwrap_or(cells.len() >= HORIZON_MIN);
+    lap.lap("mode");
     // the horizon's sort keys pack a ring (24 bits) above a patch index (40 bits)
     let fits = (rows as u64 + 1) * (cols as u64 + 1) < (1u64 << 40)
         && ((((rows * rows + cols * cols) as f64).sqrt() / RING) as u64 + 4) < (1u64 << 24);
