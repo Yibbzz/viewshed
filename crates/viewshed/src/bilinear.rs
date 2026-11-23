@@ -2442,7 +2442,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         u
     };
     let isr = &is_target;
-    let results: Vec<(Vec<(usize, bool)>, f64)> = (0..nsec)
+    let results: Vec<(Vec<(usize, bool)>, Vec<usize>, f64)> = (0..nsec)
         .into_par_iter()
         .map(|k| {
             let t_sec = std::time::Instant::now();
@@ -2457,6 +2457,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
             }
             let mut failed = vec![-1i64; nlev];
             let mut out = Vec::new();
+            let mut undecided = Vec::new();
             let mut covered = if check { vec![false; (rows + 1) * (cols + 1)] } else { Vec::new() };
             let mut max_far = f64::NEG_INFINITY;
             for ring in 0..n_rings {
@@ -2565,27 +2566,48 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                             blocker = Some((r0, c0));
                             false
                         }
-                        State::Undecided => !blocked_exact(grid, s, pyr, &cell, r, c),
+                        // settled after the sectors, all together: the undecided cells
+                        // cluster in a few sectors (sightlines along the observer's row or
+                        // column over flat ground), and one thread would carry them all
+                        State::Undecided => {
+                            undecided.push(i);
+                            continue;
+                        }
                         _ => true,
                     };
                     out.push((i, visible));
                 }
             }
-            (out, t_sec.elapsed().as_secs_f64())
+            (out, undecided, t_sec.elapsed().as_secs_f64())
         })
         .collect();
     if lap.on {
-        let mut ts: Vec<(f64, usize)> = results.iter().enumerate().map(|(k, (_, t))| (*t, k)).collect();
+        let mut ts: Vec<(f64, usize)> = results.iter().enumerate().map(|(k, (_, _, t))| (*t, k)).collect();
         let sum: f64 = ts.iter().map(|x| x.0).sum();
         ts.sort_by(|x, y| y.0.total_cmp(&x.0));
         eprintln!("phase x:sector-cpu {sum:.3}s max {:.3}s top {:?}", ts[0].0, ts.iter().take(3).map(|(t, k)| format!("{k}:{t:.3}")).collect::<Vec<_>>());
     }
-    for (v, _) in results {
+    let mut undecided = Vec::new();
+    for (v, u, _) in results {
         for (i, vis) in v {
             seen[i] = vis;
         }
+        undecided.extend(u);
     }
     lap.lap("x:sectors");
+    let exact: Vec<(usize, bool)> = undecided
+        .par_iter()
+        .with_max_len(1)
+        .map(|&i| {
+            let (r, c) = ((i / cols) as i64, (i % cols) as i64);
+            let cell = make_cell(s, grid.at(r as usize, c as usize), r, c);
+            (i, !blocked_exact(grid, s, pyr, &cell, r, c))
+        })
+        .collect();
+    for (i, vis) in exact {
+        seen[i] = vis;
+    }
+    lap.lap("x:exact");
 }
 
 pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
