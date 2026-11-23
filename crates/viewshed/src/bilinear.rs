@@ -149,11 +149,15 @@ fn make_cell(s: &Setup, z_rc: f64, r: i64, c: i64) -> Cell {
             + e_bend
             + s.e_ze);
     let mut delta: f64 = 0.0;
-    for (d, e_p, e_d) in [(du, s.e_ue, e_du), (dv, s.e_ve, e_dv)] {
+    for (p0, d, e_p, e_d, end) in [(ue, du, s.e_ue, e_du, cf), (ve, dv, s.e_ve, e_dv, rf)] {
         if d == 0.0 {
             continue;
         }
         if e_d > 1e-3 * d.abs() {
+            // too imprecise to place crossings by, but harmless if it has none
+            if no_crossings(p0, d, e_p, e_d, end) {
+                continue;
+            }
             delta = f64::INFINITY;
             break;
         }
@@ -177,6 +181,28 @@ fn make_cell(s: &Setup, z_rc: f64, r: i64, c: i64) -> Cell {
         e_dz,
         delta,
     }
+}
+
+/// Whether an axis (float start p0, direction d, errors e_p, e_d; exact end `end`, the
+/// target's coordinate) certainly has no crossing for t in (0, 1): the floats list
+/// none, and no integer is within reach of the exact coordinate (between the exact
+/// start and `end`) except `end` itself, which the sightline reaches at exactly t = 1
+/// (or lies on throughout, when the exact direction is 0: then no crossing either).
+/// Such an axis adds no error to the crossings' positions. Typical case: an observer
+/// a rounding error off a cell centre, and targets in its own row or column (before
+/// this check, delta was infinite there: every boundary flagged, the whole sightline
+/// in rational arithmetic, ~100x slower on such rasters). With `end` an integer and
+/// e_d > 1e-3 |d| forcing |d| below ~1e-7, this holds for every valid input; it is
+/// checked anyway, and the floats' own crossing list must agree.
+fn no_crossings(p0: f64, d: f64, e_p: f64, e_d: f64, end: f64) -> bool {
+    if axis(p0, d).2 != 0 {
+        return false;
+    }
+    let m = (e_p + e_d) * (1.0 + 8.0 * U) + 4.0 * U * (p0.abs() + d.abs() + end.abs() + 1.0);
+    let lo = p0.min(p0 + d).min(end) - m;
+    let hi = p0.max(p0 + d).max(end) + m;
+    let k = lo.ceil();
+    k > hi || (k == end && k + 1.0 > hi)
 }
 
 // boundary labels
@@ -651,6 +677,90 @@ fn group_ok(cell: &Cell, r: i64, c: i64, members: &[(bool, u8, i64); 3]) -> bool
     true
 }
 
+/// Certified: the sightline at every t in [t1, t2] is above height m, so its gap to
+/// any terrain no higher than m is > 0 there.
+fn above(cell: &Cell, t1: f64, t2: f64, m: f64) -> bool {
+    let (ze, dz) = (cell.ze, cell.dz);
+    let bend_lo = cell.bend - cell.e_bend;
+    let l1 = ze + t1 * dz - (cell.e_ze + t1.abs() * cell.e_dz + 3.0 * U * (ze.abs() + (t1 * dz).abs()));
+    let l2 = ze + t2 * dz - (cell.e_ze + t2.abs() * cell.e_dz + 3.0 * U * (ze.abs() + (t2 * dz).abs()));
+    let lo = l1.min(l2);
+    let bl = if bend_lo >= 0.0 {
+        let t0 = t1.max(0.0);
+        bend_lo * t0 * t0 * (1.0 - 4.0 * U)
+    } else {
+        bend_lo * (t1 * t1).max(t2 * t2) * (1.0 + 4.0 * U)
+    };
+    let lb = lo - m + bl;
+    lb - 16.0 * U * (lo.abs() + m.abs() + bl.abs()) > 0.0
+}
+
+/// Certified: the float segment [ta, tb] (consecutive boundaries, so at most one
+/// patch long) is clear, whatever the exact order of the crossings near it. Every
+/// point of the sightline with t in [ta, tb] is within sqrt(2)/2 cells (plus
+/// rounding) of the float midpoint, so in the 3 x 3 patches around the midpoint's
+/// float patch, which the pyramid's level 0 bounds; the bilinear surface is never
+/// above its patch's highest corner.
+fn clear_level0(cell: &Cell, pyr: &Pyramid, ta: f64, tb: f64) -> bool {
+    let delta = cell.delta;
+    if !delta.is_finite() {
+        return false;
+    }
+    let mid = (ta + tb) / 2.0;
+    let pr = (cell.ve + mid * cell.dv).floor() as i64 + 1;
+    let pc = (cell.ue + mid * cell.du).floor() as i64 + 1;
+    let (h, w) = pyr.shapes[0];
+    if pr < 0 || pc < 0 || pr >= h || pc >= w {
+        return false;
+    }
+    let m = pyr.data[pyr.offs[0] + (pr * w + pc) as usize];
+    above(cell, ta - delta, tb + delta, m)
+}
+
+/// Certified: wherever the sightline (t in [0, 1]) meets the closed patch (r0, c0),
+/// its gap to the patch is > 0; or it doesn't meet it. The t range is the float
+/// crossings of the patch's faces widened by twice their error bound (delta, which
+/// scales with |t| beyond 1), and the patch is never above its highest corner.
+fn patch_clear(cell: &Cell, grid: &Grid, r0: i64, c0: i64) -> bool {
+    let delta = cell.delta;
+    if !delta.is_finite() {
+        return false;
+    }
+    let p = corners(grid, r0, c0);
+    if nodata(&p) {
+        return false; // the exact routine skips it anyway
+    }
+    let (mut t1, mut t2) = (0.0f64, 1.0f64);
+    for (p0, d, e_p, e_d, k0) in [
+        (cell.ue, cell.du, cell.e_ue, cell.e_du, c0 as f64),
+        (cell.ve, cell.dv, cell.e_ve, cell.e_dv, r0 as f64),
+    ] {
+        if d == 0.0 || e_d > 1e-3 * d.abs() {
+            // delta doesn't cover this axis: compare the exact coordinate's whole
+            // range over t in [0, 1] with the patch's slab
+            let m = 2.0 * (e_p + e_d) + 4.0 * U * (p0.abs() + d.abs() + 1.0);
+            let (lo, hi) = (p0.min(p0 + d) - m, p0.max(p0 + d) + m);
+            if k0 < lo && hi < k0 + 1.0 {
+                continue;
+            }
+            if hi < k0 || lo > k0 + 1.0 {
+                return true;
+            }
+            return false;
+        }
+        let a = (k0 - p0) / d;
+        let b = (k0 + 1.0 - p0) / d;
+        let (lo, hi) = (a.min(b), a.max(b));
+        t1 = t1.max(lo - 2.0 * delta * lo.abs().max(1.0));
+        t2 = t2.min(hi + 2.0 * delta * hi.abs().max(1.0));
+    }
+    if t1 > t2 {
+        return true;
+    }
+    let m = p.z00.max(p.z01).max(p.z10).max(p.z11);
+    above(cell, t1, t2, m)
+}
+
 /// One cell: Clear (visible), Blocking (hidden) or Undecided (exact check), and the
 /// blocking patch when there is one.
 fn walk(
@@ -663,14 +773,11 @@ fn walk(
     mid: &[(f64, f64)],
     count: &mut usize,
 ) -> (State, i64, i64) {
-    let (ue, ve, du, dv, ze, dz, delta) = (
-        cell.ue, cell.ve, cell.du, cell.dv, cell.ze, cell.dz, cell.delta,
-    );
+    let (ue, ve, du, dv, delta) = (cell.ue, cell.ve, cell.du, cell.dv, cell.delta);
     let (uk, us, un) = axis(ue, du);
     let (vk, vs, vn) = axis(ve, dv);
     let (mut ui, mut vi, mut one) = (0i64, 0i64, false);
     let lim = 16.0 * delta;
-    let bend_lo = cell.bend - cell.e_bend;
     let nlev = pyr.shapes.len();
     failed.iter_mut().for_each(|f| *f = -1);
     let peek = |ui: i64, vi: i64, one: bool| -> f64 {
@@ -754,20 +861,7 @@ fn walk(
                 if tx <= tb {
                     continue;
                 }
-                let (t1, t2) = (ta - delta, tx + delta);
-                let l1 = ze + t1 * dz
-                    - (cell.e_ze + t1.abs() * cell.e_dz + 3.0 * U * (ze.abs() + (t1 * dz).abs()));
-                let l2 = ze + t2 * dz
-                    - (cell.e_ze + t2.abs() * cell.e_dz + 3.0 * U * (ze.abs() + (t2 * dz).abs()));
-                let lo = l1.min(l2);
-                let bl = if bend_lo >= 0.0 {
-                    let t0 = t1.max(0.0);
-                    bend_lo * t0 * t0 * (1.0 - 4.0 * U)
-                } else {
-                    bend_lo * (t1 * t1).max(t2 * t2) * (1.0 + 4.0 * U)
-                };
-                let lb = lo - m + bl;
-                if lb - 16.0 * U * (lo.abs() + m.abs() + bl.abs()) > 0.0 {
+                if above(cell, ta - delta, tx + delta, m) {
                     skip_to = tx;
                     cur = (lev + 1).min(nlev.saturating_sub(1));
                     break;
@@ -837,12 +931,16 @@ fn walk(
         cur = 1;
         *count += 1;
         if fa || fb {
-            state = State::Undecided;
+            // the crossings' exact order is uncertain here, but the terrain under
+            // this stretch is no higher than the 3 x 3 patch max around it
+            if !clear_level0(cell, pyr, ta, tb) {
+                state = State::Undecided;
+            }
         } else {
             let (st, r0, c0) = segment(cell, grid, ta, tb, last);
             match st {
                 State::Blocking => return (State::Blocking, r0, c0),
-                State::Undecided => state = State::Undecided,
+                State::Undecided if !clear_level0(cell, pyr, ta, tb) => state = State::Undecided,
                 _ => {}
             }
         }
@@ -970,8 +1068,9 @@ fn exact_segment_min(
 }
 
 /// Exact decision on the cell's undecided patches (with neighbours); every other
-/// segment is certified clear.
-fn blocked_exact(grid: &Grid, s: &Setup, cell: &Cell, r: i64, c: i64) -> bool {
+/// segment is certified clear (by `segment`, or by `clear_level0` where the
+/// crossings' order is uncertain).
+fn blocked_exact(grid: &Grid, s: &Setup, pyr: &Pyramid, cell: &Cell, r: i64, c: i64) -> bool {
     let (mut ts, mut fl) = (Vec::new(), Vec::new());
     boundaries(cell, r, c, &mut ts, &mut fl);
     let mut patches: Vec<(i64, i64)> = Vec::new();
@@ -987,7 +1086,7 @@ fn blocked_exact(grid: &Grid, s: &Setup, cell: &Cell, r: i64, c: i64) -> bool {
         } else {
             segment(cell, grid, ta, tb, j == ts.len() - 2)
         };
-        if st == State::Undecided {
+        if st == State::Undecided && !clear_level0(cell, pyr, ta, tb) {
             for a in -1..=1 {
                 for b in -1..=1 {
                     patches.push((r0 + a, c0 + b));
@@ -997,6 +1096,7 @@ fn blocked_exact(grid: &Grid, s: &Setup, cell: &Cell, r: i64, c: i64) -> bool {
     }
     patches.sort_unstable();
     patches.dedup();
+    patches.retain(|&(r0, c0)| !patch_clear(cell, grid, r0, c0));
     let e = exact_setup(s, grid.at(r as usize, c as usize), r, c);
     for (r0, c0) in patches {
         if let Some((ta, tb)) = exact_patch_segment(&e, r0, c0) {
@@ -1270,37 +1370,65 @@ fn bin_bounds(p: &Patch, s: &Setup, ta: f64, tb: f64, covers: bool) -> (f64, f64
     for (i, (a_, b_)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].into_iter().enumerate() {
         ca[i] = (p.r0 + b_ - s.ve).atan2(p.c0 + a_ - s.ue);
     }
-    bin_bounds_with(p, s, &ca, ta, tb, covers)
+    bin_bounds_with(p, s, &ca, &Interval::new(ta, tb), covers)
+}
+
+/// An angular interval [ta, tb] with the trigonometry bin_bounds needs: computed once
+/// per bin and reused for every patch (the same values as computing them on the spot).
+#[derive(Clone, Copy)]
+struct Interval {
+    ta: f64,
+    tb: f64,
+    /// (cos, sin) of ta, tb, tm
+    cs: [(f64, f64); 3],
+    cos_half: f64,
+    tan_half: f64,
+}
+
+impl Interval {
+    fn new(ta: f64, tb: f64) -> Interval {
+        let tm = 0.5 * (ta + tb);
+        let half = 0.5 * (tb - ta);
+        Interval {
+            ta,
+            tb,
+            cs: [(ta.cos(), ta.sin()), (tb.cos(), tb.sin()), (tm.cos(), tm.sin())],
+            cos_half: half.cos(),
+            tan_half: half.tan(),
+        }
+    }
 }
 
 /// bin_bounds with the patch's corner directions already known.
-fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], ta: f64, tb: f64, mut covers: bool) -> (f64, f64) {
+fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], iv: &Interval, mut covers: bool) -> (f64, f64) {
     let res = s.res;
-    let tm = 0.5 * (ta + tb);
-    let half = 0.5 * (tb - ta);
-    let (cth, sth) = (tm.cos(), tm.sin());
+    let (ta, tb) = (iv.ta, iv.tb);
+    let (cth, sth) = iv.cs[2];
     let (mut d1lo, mut d1hi, mut d2lo, mut d2hi) =
         (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
     // Entry and exit distances are piecewise 1/cos of the angle to an (axis-aligned)
     // face normal: extreme at the interval's ends, where the face crossed changes (patch
     // corner directions), or at a face's normal direction (an axis direction). All of
     // those that fall inside the interval are evaluated, so the extremes are exact.
-    let mut angs = [0.0f64; 16];
-    angs[..3].copy_from_slice(&[ta, tb, tm]);
+    // (cos, sin) of each direction: the interval's three from the table, the rest
+    // (rarely any) computed here
+    let mut dirs = [(0.0f64, 0.0f64); 16];
+    dirs[..3].copy_from_slice(&iv.cs);
     let mut n = 3;
     let pi = std::f64::consts::PI;
     let axes = [-pi, -0.5 * pi, 0.0, 0.5 * pi, pi];
     for &a0 in corner_angles.iter().chain(axes.iter()) {
         for wrap in [-2.0 * pi, 0.0, 2.0 * pi] {
-            if ta < a0 + wrap && a0 + wrap < tb && n < angs.len() {
-                angs[n] = a0 + wrap;
+            if ta < a0 + wrap && a0 + wrap < tb && n < dirs.len() {
+                let t = a0 + wrap;
+                dirs[n] = (t.cos(), t.sin());
                 n += 1;
             }
         }
     }
     let mut any = false;
-    for &t in &angs[..n] {
-        match stretch_d(s, p.r0, p.c0, t.cos(), t.sin()) {
+    for &(ct, st) in &dirs[..n] {
+        match stretch_d(s, p.r0, p.c0, ct, st) {
             Some((d1, d2)) => {
                 any = true;
                 d1lo = d1lo.min(d1);
@@ -1320,15 +1448,15 @@ fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], ta: f64, tb: 
         + 2.0 * e3;
     let e_pos = (s.e_ue + s.e_ve) * res; // observer position error, map units
     let pad = 1e-9 * res + 2.0 * e_pos;
-    let slack = g * half.tan() * (1.0 + REL_B) / res;
-    let d_near = d1lo * half.cos() - pad;
+    let slack = g * iv.tan_half * (1.0 + REL_B) / res;
+    let d_near = d1lo * iv.cos_half - pad;
     // the observer's position error moves every point by e_pos, its eye by e_ze
     let err_obs = if d_near > 0.0 { (g * (e_pos / res) + s.e_ze) / d_near } else { f64::INFINITY };
-    let (ub_v, size) = centre_max(p, s, cth, sth, d_near.max(0.0), d2hi / half.cos() + pad);
+    let (ub_v, size) = centre_max(p, s, cth, sth, d_near.max(0.0), d2hi / iv.cos_half + pad);
     let ub = ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack);
     let mut lb = f64::NEG_INFINITY;
     if covers && d1hi < d2lo {
-        let (a, b) = (d1hi / half.cos() + pad, d2lo * half.cos() - pad);
+        let (a, b) = (d1hi / iv.cos_half + pad, d2lo * iv.cos_half - pad);
         if a < b {
             let (lb_v, size) = centre_max(p, s, cth, sth, a, b);
             lb = lb_v - slack - err_obs - REL_B * (size + lb_v.abs() + slack);
@@ -1412,6 +1540,8 @@ struct Bins {
     /// per bin: the largest upper bound of the candidates dropped when the list was
     /// full (the smallest ones go): every dropped patch has H <= this in the bin
     over: Vec<f64>,
+    /// per bin: its interval [edge(i), edge(i + 1)] with trigonometry
+    iv: Vec<Interval>,
     n: usize,
     scale: f64,
 }
@@ -1419,12 +1549,15 @@ struct Bins {
 impl Bins {
     fn new(n: usize) -> Bins {
         let n = n.next_power_of_two();
+        let scale = n as f64 / (2.0 * std::f64::consts::PI);
+        let edge = |k: i64| k as f64 / scale - std::f64::consts::PI;
         Bins {
             low: vec![f64::NEG_INFINITY; n],
             cand: (0..n).map(|_| Vec::new()).collect(),
             over: vec![f64::NEG_INFINITY; n],
+            iv: (0..n as i64).map(|k| Interval::new(edge(k), edge(k + 1))).collect(),
             n,
-            scale: n as f64 / (2.0 * std::f64::consts::PI),
+            scale,
         }
     }
 
@@ -1451,6 +1584,7 @@ impl Bins {
         let scale = self.scale;
         let edge = |k: i64| k as f64 / scale - std::f64::consts::PI;
         let index = |t: f64| ((t + std::f64::consts::PI) * scale).floor() as i64;
+        let table = &self.iv;
         self.low
             .par_chunks_mut(chunk)
             .zip(self.cand.par_chunks_mut(chunk))
@@ -1480,9 +1614,11 @@ impl Bins {
                             }
                             ca
                         });
-                        let (ta, tb) = (edge(k), edge(k + 1));
-                        let covers = hp.lo_in <= ta && hp.hi_in >= tb;
-                        let (lb, ub) = bin_bounds_with(&p, s, &ca, ta, tb, covers);
+                        // a span wrapping past +-pi has k outside 0..n: its edges are
+                        // shifted by 2 pi, so compute them as such (as always)
+                        let iv = if k == i { table[i as usize] } else { Interval::new(edge(k), edge(k + 1)) };
+                        let covers = hp.lo_in <= iv.ta && hp.hi_in >= iv.tb;
+                        let (lb, ub) = bin_bounds_with(&p, s, &ca, &iv, covers);
                         if ub <= low[li] {
                             continue;
                         }
@@ -1702,7 +1838,7 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                             blocker = Some((r0, c0));
                             false
                         }
-                        State::Undecided => !blocked_exact(grid, s, &cell, r, c),
+                        State::Undecided => !blocked_exact(grid, s, pyr, &cell, r, c),
                         _ => true,
                     };
                     out.push((idx, visible));
@@ -1832,7 +1968,7 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
                             blocker = Some((r0, c0));
                             false
                         }
-                        State::Undecided => !blocked_exact(grid, &s, &cell, r, c),
+                        State::Undecided => !blocked_exact(grid, &s, &pyr, &cell, r, c),
                         _ => true,
                     }));
                 }

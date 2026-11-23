@@ -42,6 +42,40 @@ def random_jobs(n_jobs=40, seed=11):
                   curve, 0.13, [6371008.8, 30.0 * res][(k // 2) % 2])
 
 
+def near_lattice_jobs(n_jobs=36, seed=23):
+    """Observers a rounding error off a cell centre or a grid line (UTM-scale origins,
+    as real georeferencing gives), hydro-flattened plateaus (exact ties over many
+    patches) and integer heights: sightlines that run along, or pass within ~1e-11
+    of, grid lines and lattice points for their whole length."""
+    rng = np.random.default_rng(seed)
+    for k in range(n_jobs):
+        n = int(rng.integers(20, 64))
+        dem = rng.normal(0, rng.uniform(0.05, 1.0), (n, n)).cumsum(0).cumsum(1) * 0.05 + 550.0
+        for _ in range(int(rng.integers(1, 4))):  # flat lakes
+            r0, c0 = rng.integers(0, n - 4, 2)
+            h, w = rng.integers(3, n // 2, 2)
+            dem[r0:r0 + h, c0:c0 + w] = np.float32(dem[r0:r0 + h, c0:c0 + w].min())
+        if k % 4 == 1:
+            dem = np.round(dem)
+        if k % 6 == 5:
+            dem[rng.random((n, n)) < 0.05] = np.nan
+        res = [10.0, 1.0, 30.0, 0.5][k % 4]
+        x0 = float(rng.uniform(1e5, 9e5)) + 0.69978725986
+        y0 = float(rng.uniform(1e6, 9e6)) + 0.1998547595
+        gt = (x0, res, 0.0, y0, 0.0, -res)
+        c0, r0 = (int(v) for v in rng.integers(2, n - 2, 2))
+        if np.isnan(dem[r0, c0]):
+            dem[r0, c0] = 550.0
+        # cell centre, corner or edge midpoint, computed in floats from the origin
+        fx, fy = [(0.5, 0.5), (0.0, 0.0), (0.5, 0.0), (0.0, 0.5)][k % 4]
+        obs = (x0 + (c0 + fx) * res, y0 - (r0 + fy) * res)
+        if k % 3 == 2:  # a hair off as well
+            obs = (obs[0] + float(rng.choice([-1, 1])) * 1e-9 * res, obs[1])
+        th = [0.0, 0.0, 0.5][k % 3]
+        yield Job(dem, gt, obs, float(rng.choice([1.6, 10.0])), th, None,
+                  bool(k % 2), 0.13, 6371008.8)
+
+
 def fixed_jobs():
     for f in datasets.DATASETS.values():
         for th in datasets.TARGET_HEIGHTS:
@@ -58,7 +92,7 @@ def _oracle(job):
 
 
 @pytest.mark.parametrize("mode", ["rows", "horizon"])
-@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs()])
+@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs(), *near_lattice_jobs()])
 def test_bilinear_equals_oracle(job, mode, monkeypatch):
     # the crate picks a mode per raster (row-major walk, or rings with the horizon
     # filters); both are exact, and both are checked here on every job
