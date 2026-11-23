@@ -1291,10 +1291,6 @@ fn ring_of(d: f64, res: f64) -> usize {
     ((d / res + 1.0) / RING).floor() as usize + 1
 }
 
-/// Where each ring starts in a slice sorted by ring (n + 1 offsets).
-fn ring_starts<T>(sorted: &[T], n: usize, key: impl Fn(&T) -> u32) -> Vec<usize> {
-    (0..=n).map(|k| sorted.partition_point(|x| (key(x) as usize) < k)).collect()
-}
 
 /// Phase timing for VIEWSHED_DEBUG (stderr): each `lap` prints the time since the last.
 struct Lap {
@@ -1846,7 +1842,7 @@ fn block_culled(bins: &Bins, grid: &Grid, s: &Setup, r0: usize, c0: usize) -> bo
         return false;
     }
     for q in a..=b {
-        if !(smax < bins.low[q.rem_euclid(n) as usize]) {
+        if smax.partial_cmp(&bins.low[q.rem_euclid(n) as usize]) != Some(std::cmp::Ordering::Less) {
             return false;
         }
     }
@@ -1859,53 +1855,55 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
     let (rows, cols) = (grid.rows, grid.cols);
     let nlev = pyr.shapes.len();
     let res = s.res;
-    // the cells by ring, each ring by angle: one flat array, sorted, cut at the rings
     let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / RING) as usize + 4;
-    let last = (n_rings - 1) as u32;
-    // key: ring, then the direction in 2^40 steps per turn (the order within a ring
-    // only affects speed, never a result)
-    let mut keyed: Vec<(u64, usize)> = cells
-        .par_iter()
-        .map(|&(r, c)| {
-            let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
-            let d = (du * du + dv * dv).sqrt();
-            let ring = ((d / RING).floor() as u64).min(last as u64);
-            let q = ((dv.atan2(du) + std::f64::consts::PI) * (TURN as f64 / (2.0 * std::f64::consts::PI))) as u64;
-            ((ring << 40) | q.min(TURN - 1), r as usize * cols + c as usize)
-        })
-        .collect();
-    keyed.par_sort_unstable();
-    let ring_at = ring_starts(&keyed, n_rings, |k| (k.0 >> 40) as u32);
-    lap.lap("h:rings");
-    // every patch, by the ring before which it lies entirely inside the processed
-    // radius (by its farthest point), so the bins only ever hold terrain nearer than
-    // every target they are asked about; prepared lazily
+    let last = n_rings - 1;
     let (rows_i, cols_i) = (rows as i64, cols as i64);
     let near = NEAR * res;
-    // key: ring, then the patch's row-major index (as generated)
-    let pw = (cols + 1) as u64;
-    let mut pkeys: Vec<u64> = (-1..rows_i)
-        .into_par_iter()
-        .flat_map_iter(|r0| {
-            (-1..cols_i).filter_map(move |c0| {
-                let d0 = patch_dmin(s, r0, c0);
-                if d0 < near {
-                    return None;
-                }
-                let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
-                let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
-                let ring = ring_of(far, res).min(n_rings - 1) as u64;
-                Some((ring << 40) | ((r0 + 1) as u64 * pw + (c0 + 1) as u64))
-            })
-        })
-        .collect();
-    pkeys.par_sort_unstable();
-    let patch_at = ring_starts(&pkeys, n_rings, |k| (k >> 40) as u32);
-    lap.lap("h:patch-keys");
-    let mut bins = Bins::new(SECTORS * rows.max(cols));
-    let ang = Angles::new(s, rows, cols);
-    // culling blocks by the ring of their nearest point, and what culling decides: cells
-    // (hidden) and patches (left out of the bins), indexed like the patch keys
+    // The cells and patches are handed out lazily, by culling blocks (CULL_BLOCK cells a
+    // side): each ring, after its patches are inserted, the blocks whose nearest point
+    // lies in it are tested against the bins; a culled block's cells are hidden and its
+    // patches never prepared; the others hand their target cells to the rings they lie
+    // in and their patches to the rings before which they must be inserted. So only
+    // surviving terrain is keyed, sorted and prepared.
+    let mut is_target = vec![false; rows * cols];
+    for &(r, c) in cells {
+        is_target[r as usize * cols + c as usize] = true;
+    }
+    // a cell's ring and its key within the ring (direction in 2^40 steps per turn: the
+    // order within a ring only affects speed, never a result)
+    let cell_key = |i: usize| -> (usize, (u64, usize)) {
+        let (r, c) = (i / cols, i % cols);
+        let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
+        let d = (du * du + dv * dv).sqrt();
+        let ring = ((d / RING).floor() as usize).min(last);
+        let q = ((dv.atan2(du) + std::f64::consts::PI) * (TURN as f64 / (2.0 * std::f64::consts::PI))) as u64;
+        (ring, (q.min(TURN - 1), i))
+    };
+    // a patch's insertion ring: the ring before which it lies entirely inside the
+    // processed radius (by its farthest point); patches within NEAR stay with the walk
+    let patch_ring = |r0: i64, c0: i64| -> Option<usize> {
+        if patch_dmin(s, r0, c0) < near {
+            return None;
+        }
+        let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
+        let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
+        Some(ring_of(far, res).min(last))
+    };
+    let mut cbuck: Vec<Vec<(u64, usize)>> = (0..n_rings).map(|_| Vec::new()).collect();
+    let mut pbuck: Vec<Vec<(i64, i64)>> = (0..n_rings).map(|_| Vec::new()).collect();
+    // patches on the -1 row and column belong to no block
+    for c0 in -1..cols_i {
+        if let Some(k) = patch_ring(-1, c0) {
+            pbuck[k].push((-1, c0));
+        }
+    }
+    for r0 in 0..rows_i {
+        if let Some(k) = patch_ring(r0, -1) {
+            pbuck[k].push((r0, -1));
+        }
+    }
+    // blocks by ring (of their nearest point, less a hair: no cell of a block can then
+    // belong to an earlier ring)
     let kb = CULL_BLOCK;
     let mut blocks: Vec<Vec<(usize, usize)>> = (0..n_rings).map(|_| Vec::new()).collect();
     for r0 in (0..rows).step_by(kb) {
@@ -1913,56 +1911,67 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
             let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + kb) as f64 - s.ue, r0 as f64 - s.ve, (r0 + kb) as f64 - s.ve);
             let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
             let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
-            let d = (dx * dx + dy * dy).sqrt();
-            blocks[((d / RING).floor() as usize).min(n_rings - 1)].push((r0, c0));
+            let d = (dx * dx + dy * dy).sqrt() - 1e-6;
+            blocks[((d.max(0.0) / RING).floor() as usize).min(last)].push((r0, c0));
         }
     }
-    let mut cell_off = vec![false; rows * cols];
-    let mut patch_off = vec![false; (rows + 1) * (cols + 1)];
-    lap.lap("h:bins-new+angles");
+    let mut bins = Bins::new(SECTORS * rows.max(cols));
+    let ang = Angles::new(s, rows, cols);
+    lap.lap("h:blocks+angles");
     let (mut t_prep, mut t_ins, mut t_q) = (0.0f64, 0.0f64, 0.0f64);
+    let isr = &is_target;
     for ring in 0..n_rings {
         // every patch entirely nearer than the ring's inner edge (less a cell)
         let inserted = ((ring as f64) * RING - 1.0) * res;
-        let pring = &pkeys[patch_at[ring]..patch_at[ring + 1]];
-        let poff = &patch_off;
+        let pring = std::mem::take(&mut pbuck[ring]);
         if !pring.is_empty() {
             let t0 = std::time::Instant::now();
             let prepared: Vec<(i64, i64, HPatch)> = pring
                 .par_iter()
-                .filter_map(|&k| {
-                    let i = k & ((1u64 << 40) - 1);
-                    if poff[i as usize] {
-                        return None; // culled: dominated by inserted terrain
-                    }
-                    let (r0, c0) = ((i / pw) as i64 - 1, (i % pw) as i64 - 1);
-                    prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)).map(|hp| (r0, c0, hp))
-                })
+                .filter_map(|&(r0, c0)| prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)).map(|hp| (r0, c0, hp)))
                 .collect();
             t_prep += t0.elapsed().as_secs_f64();
             let t0 = std::time::Instant::now();
             bins.insert_all(grid, s, &ang, &prepared);
             t_ins += t0.elapsed().as_secs_f64();
         }
-        // the blocks whose nearest point is in this ring, against the bins so far
-        let culled: Vec<(usize, usize)> = blocks[ring]
+        // this ring's blocks, against the bins so far: culled (nothing to hand out) or
+        // handing out their target cells and patches
+        type Handed = (Vec<(usize, (u64, usize))>, Vec<(usize, (i64, i64))>);
+        let handed: Vec<Handed> = blocks[ring]
             .par_iter()
-            .filter(|&&(r0, c0)| block_culled(&bins, grid, s, r0, c0))
-            .cloned()
-            .collect();
-        for (r0, c0) in culled {
-            for r in r0..(r0 + kb).min(rows) {
-                for c in c0..(c0 + kb).min(cols) {
-                    cell_off[r * cols + c] = true;
-                    patch_off[(r + 1) * pw as usize + (c + 1)] = true;
+            .filter(|&&(r0, c0)| !block_culled(&bins, grid, s, r0, c0))
+            .map(|&(r0, c0)| {
+                let (mut cs, mut ps) = (Vec::new(), Vec::new());
+                for r in r0..(r0 + kb).min(rows) {
+                    for c in c0..(c0 + kb).min(cols) {
+                        let i = r * cols + c;
+                        if isr[i] {
+                            cs.push(cell_key(i));
+                        }
+                        if let Some(k) = patch_ring(r as i64, c as i64) {
+                            ps.push((k, (r as i64, c as i64)));
+                        }
+                    }
                 }
+                (cs, ps)
+            })
+            .collect();
+        for (cs, ps) in handed {
+            for (k, key) in cs {
+                debug_assert!(k >= ring);
+                cbuck[k.max(ring)].push(key);
+            }
+            for (k, rc) in ps {
+                debug_assert!(k > ring);
+                pbuck[k].push(rc);
             }
         }
-        let cring = &keyed[ring_at[ring]..ring_at[ring + 1]];
+        let mut cring = std::mem::take(&mut cbuck[ring]);
         if cring.is_empty() {
             continue;
         }
-        let coff = &cell_off;
+        cring.sort_unstable();
         let h = &bins;
         let t0 = std::time::Instant::now();
         let results: Vec<(usize, bool)> = cring
@@ -1972,10 +1981,6 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                 let mut blocker: Option<(i64, i64)> = None;
                 let mut out = Vec::with_capacity(chunk.len());
                 for &(_, i) in chunk {
-                    if coff[i] {
-                        out.push((i, false)); // in a culled block: hidden
-                        continue;
-                    }
                     let (r, c) = ((i / cols) as i64, (i % cols) as i64);
                     let zt = grid.at(r as usize, c as usize);
                     let cell = make_cell(s, zt, r, c);
