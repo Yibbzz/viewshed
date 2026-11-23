@@ -29,7 +29,9 @@
 //! every 4 x 4 block of cells whose nearest point lies in it is tested against the
 //! bins; a block certainly below them is hidden, and its patches can never be horizon,
 //! so they are never prepared or inserted (only surviving terrain is keyed and
-//! sorted). Large rasters take the rings, small ones the row-major walk.
+//! sorted). Large rasters run the rings per angular sector, each sector on its own
+//! thread with its own bins (no synchronisation between rings); small ones take the
+//! row-major walk.
 //!
 //! This follows the conformance suite's `certify.py` and `oracle_numba.py`, which
 //! hold the method to the plain exact oracle (`oracle.py`) cell for cell.
@@ -765,6 +767,7 @@ fn patch_clear(cell: &Cell, grid: &Grid, r0: i64, c0: i64) -> bool {
 
 /// One cell: Clear (visible), Blocking (hidden) or Undecided (exact check), and the
 /// blocking patch when there is one.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     cell: &Cell,
     grid: &Grid,
@@ -775,13 +778,33 @@ fn walk(
     mid: &[(f64, f64)],
     count: &mut usize,
 ) -> (State, i64, i64) {
+    walk_impl(cell, grid, pyr, r, c, failed, mid, count, true)
+}
+
+/// walk with the pyramid's skipping optional: off for a sightline certified clear but
+/// for its last few cells, where coarse blocks can't skip anything. Decisions are the
+/// same either way (the pyramid only skips).
+#[allow(clippy::too_many_arguments)]
+fn walk_impl(
+    cell: &Cell,
+    grid: &Grid,
+    pyr: &Pyramid,
+    r: i64,
+    c: i64,
+    failed: &mut [i64],
+    mid: &[(f64, f64)],
+    count: &mut usize,
+    pyramid: bool,
+) -> (State, i64, i64) {
     let (ue, ve, du, dv, delta) = (cell.ue, cell.ve, cell.du, cell.dv, cell.delta);
     let (uk, us, un) = axis(ue, du);
     let (vk, vs, vn) = axis(ve, dv);
     let (mut ui, mut vi, mut one) = (0i64, 0i64, false);
     let lim = 16.0 * delta;
     let nlev = pyr.shapes.len();
-    failed.iter_mut().for_each(|f| *f = -1);
+    if pyramid {
+        failed.iter_mut().for_each(|f| *f = -1);
+    }
     let peek = |ui: i64, vi: i64, one: bool| -> f64 {
         let mut best = if one { f64::INFINITY } else { 1.0 };
         if ui < un {
@@ -834,7 +857,7 @@ fn walk(
         if next_mid < mid.len() && ta >= mid[next_mid].0 && mid[next_mid].1 > tb {
             skip_to = mid[next_mid].1;
         }
-        if skip_to < 0.0 && delta.is_finite() {
+        if pyramid && skip_to < 0.0 && delta.is_finite() {
             let mid = (ta + tb) / 2.0;
             let pr = (ve + mid * dv).floor() as i64 + 1;
             let pc = (ue + mid * du).floor() as i64 + 1;
@@ -1174,10 +1197,12 @@ fn within(s: &Setup, r: i64, c: i64, max: f64) -> bool {
 
 const NEAR: f64 = 3.0; // patches nearer than this many cells stay with the walk
 const SECTORS: usize = 8; // horizon sectors per cell of raster width
-// Rasters with at least this many target cells take the horizon mode: with hidden-block
-// culling it is within 2% of the better mode in total over 219 real-terrain cases (lake
-// windows and observers from map coordinates included) and at most 1.9x slower on any;
-// the row-major walk was 2.6x slower in total. Smaller rasters take the walk.
+// Rasters with at least this many target cells take the sector-parallel horizon; smaller
+// ones the row-major walk. Over 219 real-terrain cases (1001^2 and 2001^2, five terrains,
+// lake windows and observers from map coordinates) the sector mode was within 1% of the
+// fastest of the three modes in total and at most 1.32x slower on any (fully visible
+// 1001^2 sea windows, where the walk wins); the single-array horizon mode was 1.30x in
+// total, the walk 3.6x. All three agreed on every cell.
 const HORIZON_MIN: usize = 32_768;
 const RING: f64 = 8.0; // ring width in cells (with culling, wider rings cost less overhead than their longer walked gaps: 8 vs 4 is 2-9% faster on all eight rbench cases)
 const TURN: u64 = 1 << 40; // direction steps per turn in the cells' sort key
@@ -2046,6 +2071,448 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
     lap.lap("h:ring-loop");
 }
 
+// --- sector-parallel horizon (the default for large rasters) --------------------------
+//
+// horizon_phase per angular sector, one thread per sector: each sector owns bins over
+// its angle range (plus a margin) and runs the rings, culling, hand-out and queries for
+// the targets whose direction lies in it, with no synchronisation between rings, so the
+// rings can be narrow. Blocks go to every sector their span meets, and each sector culls
+// a block over the part of its span inside the sector's range: that covers every
+// direction the sector answers for (its own targets, and its own copies of the patches).
+// A patch is inserted by every sector it meets, into that sector's bins only; a target is
+// asked only of its own sector's bins (a direction error leaving the range -> the full
+// walk). A clear target above u_near (every point of the patches left out of the bins
+// near the observer is below it) skips from the observer: only its last cells and any
+// straddling candidates are walked, without the pyramid.
+
+const SEC_N: usize = 64;
+const SEC_SHIFT: f64 = 0.012_345_678_9; // sector ends off the axis directions
+const SEC_MARGIN: f64 = 1e-6;
+const SEC_RING: f64 = 2.0; // ring width in cells within a sector (1-8 within noise)
+
+/// Bins over [a, b] (sector coordinates), the same width as horizon mode's.
+struct SBins {
+    a: f64,
+    scale: f64,
+    low: Vec<f64>,
+    cand: Vec<Vec<Cand>>,
+    over: Vec<f64>,
+    iv: Vec<Interval>,
+}
+
+impl SBins {
+    fn new(a: f64, b: f64, scale: f64) -> SBins {
+        let n = ((b - a) * scale).ceil() as usize + 1;
+        let edge = |k: usize| a + k as f64 / scale;
+        SBins {
+            a,
+            scale,
+            low: vec![f64::NEG_INFINITY; n],
+            cand: (0..n).map(|_| Vec::new()).collect(),
+            over: vec![f64::NEG_INFINITY; n],
+            iv: (0..n).map(|k| Interval::new(edge(k), edge(k + 1))).collect(),
+        }
+    }
+
+    fn index(&self, t: f64) -> i64 {
+        ((t - self.a) * self.scale).floor() as i64
+    }
+
+    /// Insert patch (r0, c0) whose span (sector coordinates) is hp.
+    fn insert(&mut self, grid: &Grid, s: &Setup, ang: &Angles, r0: i64, c0: i64, hp: &HPatch) {
+        let n = self.low.len() as i64;
+        let (a, b) = (self.index(hp.lo).max(0), self.index(hp.hi).min(n - 1));
+        if a > b {
+            return;
+        }
+        let p = corners(grid, r0, c0);
+        let mut angles: Option<[f64; 4]> = None;
+        for k in a..=b {
+            let li = k as usize;
+            if hp.slope <= self.low[li] {
+                continue;
+            }
+            let ca = *angles.get_or_insert_with(|| ang.patch(r0, c0));
+            let iv = self.iv[li];
+            let covers = hp.lo_in <= iv.ta && hp.hi_in >= iv.tb;
+            let (lb, ub) = bin_bounds_with(&p, s, &ca, &iv, covers);
+            if ub <= self.low[li] {
+                continue;
+            }
+            if lb > self.low[li] {
+                self.low[li] = lb;
+                self.cand[li].retain(|c| c.ub > lb);
+            }
+            self.cand[li].push(Cand { r0, c0, lo_in: hp.lo_in, hi_in: hp.hi_in, ub });
+            if self.cand[li].len() > CAND_CAP {
+                let (m, _) = self.cand[li].iter().enumerate().min_by(|x, y| x.1.ub.total_cmp(&y.1.ub)).unwrap();
+                let dropped = self.cand[li].swap_remove(m);
+                self.over[li] = self.over[li].max(dropped.ub);
+            }
+        }
+    }
+
+    /// bins_verdict over this sector's bins (theta in sector coordinates).
+    #[allow(clippy::too_many_arguments)]
+    fn verdict(&self, grid: &Grid, s: &Setup, lo: f64, hi: f64, theta: f64, widen: f64) -> Verdict {
+        let n = self.low.len() as i64;
+        let (a, b) = (self.index(theta - widen), self.index(theta + widen));
+        if a < 0 || b >= n {
+            return Verdict::Unknown;
+        }
+        let (mut lmin, mut lmax) = (f64::INFINITY, f64::NEG_INFINITY);
+        for k in a..=b {
+            let i = k as usize;
+            lmin = lmin.min(self.low[i]);
+            lmax = lmax.max(self.low[i]).max(self.over[i]);
+        }
+        if hi < lmin {
+            return Verdict::Hidden;
+        }
+        let clear = lo > lmax;
+        let mut straddle = Vec::new();
+        for k in a..=b {
+            for c in &self.cand[k as usize] {
+                if c.ub < lo {
+                    continue;
+                }
+                let p = corners(grid, c.r0, c.c0);
+                let covers = c.lo_in <= theta - widen && c.hi_in >= theta + widen;
+                let (lb, ub) = ray_bounds(&p, s, theta, widen, covers);
+                if lb > hi {
+                    return Verdict::Hidden;
+                }
+                if ub >= lo {
+                    straddle.push((c.r0, c.c0));
+                    if straddle.len() > 8 {
+                        return Verdict::Unknown;
+                    }
+                }
+            }
+        }
+        if clear {
+            Verdict::Clear(straddle)
+        } else {
+            Verdict::Unknown
+        }
+    }
+
+    /// block_culled against these bins, over the part of the square's span [ta, tb]
+    /// (sector coordinates) inside the bins' range: that covers every direction this
+    /// sector answers for (its own targets, and its own copies of the patches), so a
+    /// block culled here is hidden in those directions; other sectors decide theirs.
+    fn culls(&self, smax: f64, ta: f64, tb: f64) -> bool {
+        let n = self.low.len() as i64;
+        let (a, b) = (self.index(ta).max(0), self.index(tb).min(n - 1));
+        if a > b {
+            return false;
+        }
+        for k in a..=b {
+            if smax.partial_cmp(&self.low[k as usize]) != Some(std::cmp::Ordering::Less) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// A culling block's slope bound and angular span (atan2 coordinates), or None when it
+/// can't be culled (no-data, too near). As in block_culled.
+fn block_bound(grid: &Grid, s: &Setup, r0: usize, c0: usize) -> Option<(f64, f64, f64)> {
+    let kb = CULL_BLOCK;
+    let (rows, cols) = (grid.rows, grid.cols);
+    let mut hmax = f64::NEG_INFINITY;
+    for r in r0..=(r0 + kb).min(rows - 1) {
+        for c in c0..=(c0 + kb).min(cols - 1) {
+            let v = grid.at(r, c);
+            if v.is_nan() {
+                return None;
+            }
+            hmax = hmax.max(v);
+        }
+    }
+    let res = s.res;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + kb) as f64 - s.ue, r0 as f64 - s.ve, (r0 + kb) as f64 - s.ve);
+    let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
+    let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
+    let d_lo = (dx * dx + dy * dy).sqrt() * res * (1.0 - REL) - 2.0 * e_pos;
+    if d_lo < 3.0 * res {
+        return None;
+    }
+    let d_hi = far_corner(u0, u1, v0, v1) * res * (1.0 + REL) + 2.0 * e_pos;
+    let smax = slope_hi(hmax + s.th.max(0.0), s.ze - s.e_ze, s.drop, d_lo, d_hi);
+    let (lo, hi) = square_span(s, r0, c0, kb);
+    let w = 1e-9 + 8.0 * e_pos / d_lo;
+    Some((smax, lo - w, hi + w))
+}
+
+/// Angular span (atan2 coordinates, lo may be below -pi) of the square [c0, c0 + k] x
+/// [r0, r0 + k] seen from the observer (not containing it).
+fn square_span(s: &Setup, r0: usize, c0: usize, k: usize) -> (f64, f64) {
+    let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + k) as f64 - s.ue, r0 as f64 - s.ve, (r0 + k) as f64 - s.ve);
+    let ca = [v0.atan2(u0), v0.atan2(u1), v1.atan2(u0), v1.atan2(u1)];
+    let centre = ca[0];
+    let (mut alo, mut ahi) = (0.0f64, 0.0f64);
+    for &a in &ca[1..] {
+        let mut a = a - centre;
+        if a > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
+        } else if a < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        alo = alo.min(a);
+        ahi = ahi.max(a);
+    }
+    (centre + alo, centre + ahi)
+}
+
+/// The cells by the sector-parallel horizon (VIEWSHED_MODE=sector).
+fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
+    use std::f64::consts::PI;
+    let mut lap = Lap::new();
+    let (rows, cols) = (grid.rows, grid.cols);
+    let (rows_i, cols_i) = (rows as i64, cols as i64);
+    let nlev = pyr.shapes.len();
+    let res = s.res;
+    let rw = SEC_RING;
+    let near = NEAR * res;
+    let kb = CULL_BLOCK;
+    // VIEWSHED_SECN overrides the sector count (conformance runs few sectors so that
+    // blocks fit inside them and culling is exercised on small rasters)
+    let nsec: usize = std::env::var("VIEWSHED_SECN").ok().and_then(|v| v.parse().ok()).unwrap_or(SEC_N);
+    let base = -PI + SEC_SHIFT;
+    let width = 2.0 * PI / nsec as f64;
+    let to_sec = |t: f64| {
+        let mut t = t;
+        while t < base {
+            t += 2.0 * PI;
+        }
+        while t >= base + 2.0 * PI {
+            t -= 2.0 * PI;
+        }
+        t
+    };
+    let sec_of = |t: f64| (((to_sec(t) - base) / width).floor() as usize).min(nsec - 1);
+    let scale = (SECTORS * rows.max(cols)).next_power_of_two() as f64 / (2.0 * PI);
+    let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / rw) as usize + 4;
+    let last = n_rings - 1;
+    let mut is_target = vec![false; rows * cols];
+    for &(r, c) in cells {
+        is_target[r as usize * cols + c as usize] = true;
+    }
+    let ang = Angles::new(s, rows, cols);
+    // sectors a span (atan2 coordinates) meets, with the margin; and whether it lies
+    // inside one sector (then that sector's bins cover it)
+    let sectors_of = |lo: f64, hi: f64| -> (Vec<usize>, bool) {
+        if hi - lo >= 2.0 * PI - 1e-9 {
+            return ((0..nsec).collect(), false);
+        }
+        let l = to_sec(lo);
+        let h = l + (hi - lo);
+        let a = ((l - SEC_MARGIN - base) / width).floor() as i64;
+        let b = ((h + SEC_MARGIN - base) / width).floor() as i64;
+        let v: Vec<usize> = (a..=b).map(|k| k.rem_euclid(nsec as i64) as usize).collect();
+        let inside = a == b;
+        (v, inside)
+    };
+    // blocks routed to sectors, by ring (nearest point less a hair)
+    let mut sblocks: Vec<Vec<Vec<(usize, usize, bool)>>> = (0..nsec).map(|_| (0..n_rings).map(|_| Vec::new()).collect()).collect();
+    type Routed = (usize, usize, usize, Vec<usize>, bool);
+    let routed: Vec<Routed> = (0..rows)
+        .into_par_iter()
+        .step_by(kb)
+        .flat_map_iter(|r0| {
+            (0..cols).step_by(kb).map(move |c0| {
+                let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + kb) as f64 - s.ue, r0 as f64 - s.ve, (r0 + kb) as f64 - s.ve);
+                let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
+                let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
+                let d = (dx * dx + dy * dy).sqrt();
+                let ring = (((d - 1e-6).max(0.0) / rw).floor() as usize).min(last);
+                let (secs, inside) = if dx == 0.0 && dy == 0.0 {
+                    ((0..nsec).collect(), false)
+                } else {
+                    let (lo, hi) = square_span(s, r0, c0, kb);
+                    sectors_of(lo - 1e-9, hi + 1e-9)
+                };
+                (r0, c0, ring, secs, inside)
+            })
+        })
+        .collect();
+    for (r0, c0, ring, secs, inside) in routed {
+        for k in secs {
+            sblocks[k][ring].push((r0, c0, inside));
+        }
+    }
+    // patches on the -1 row and column belong to no block: route by span
+    let mut sborder: Vec<Vec<(i64, i64)>> = (0..nsec).map(|_| Vec::new()).collect();
+    for (r0, c0) in (-1..cols_i).map(|c| (-1, c)).chain((0..rows_i).map(|r| (r, -1))) {
+        if patch_dmin(s, r0, c0) < near {
+            continue;
+        }
+        if let Some(hp) = prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)) {
+            for k in sectors_of(hp.lo, hp.hi).0 {
+                sborder[k].push((r0, c0));
+            }
+        }
+    }
+    lap.lap("x:route");
+    let patch_ring = |r0: i64, c0: i64| -> Option<usize> {
+        if patch_dmin(s, r0, c0) < near {
+            return None;
+        }
+        let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
+        let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
+        Some((((far / res + 1.0) / rw).floor() as usize + 1).min(last))
+    };
+    // u_near: an upper bound on the slope of every point of the patches left out of the
+    // bins (nearer than NEAR): each patch's highest corner over its distance range. A
+    // clear target above it is clear of them too, so its walk can skip from the observer.
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let u_near = {
+        let nn = NEAR as i64 + 2;
+        let (oc, or) = (s.ue.floor() as i64, s.ve.floor() as i64);
+        let mut u = f64::NEG_INFINITY;
+        for pr in or - nn..=or + nn {
+            for pc in oc - nn..=oc + nn {
+                if pr < -1 || pc < -1 || pr >= rows_i || pc >= cols_i || patch_dmin(s, pr, pc) >= near {
+                    continue;
+                }
+                let p = corners(grid, pr, pc);
+                if nodata(&p) {
+                    continue;
+                }
+                let hmax = p.z00.max(p.z01).max(p.z10).max(p.z11);
+                let dl = (patch_dmin(s, pr, pc) * (1.0 - REL) - 2.0 * e_pos).max(1e-300);
+                let dh = far_corner(pc as f64 - s.ue, pc as f64 + 1.0 - s.ue, pr as f64 - s.ve, pr as f64 + 1.0 - s.ve) * res * (1.0 + REL) + 2.0 * e_pos;
+                u = u.max(slope_hi(hmax, s.ze - s.e_ze, s.drop, dl, dh));
+            }
+        }
+        u
+    };
+    let isr = &is_target;
+    let results: Vec<(Vec<(usize, bool)>, f64)> = (0..nsec)
+        .into_par_iter()
+        .map(|k| {
+            let t_sec = std::time::Instant::now();
+            let (a, b) = (base + k as f64 * width - SEC_MARGIN, base + (k + 1) as f64 * width + SEC_MARGIN);
+            let mut bins = SBins::new(a, b, scale);
+            let mut cbuck: Vec<Vec<(u64, usize)>> = (0..n_rings).map(|_| Vec::new()).collect();
+            let mut pbuck: Vec<Vec<(i64, i64)>> = (0..n_rings).map(|_| Vec::new()).collect();
+            for &(r0, c0) in &sborder[k] {
+                if let Some(q) = patch_ring(r0, c0) {
+                    pbuck[q].push((r0, c0));
+                }
+            }
+            let mut failed = vec![-1i64; nlev];
+            let mut out = Vec::new();
+            for ring in 0..n_rings {
+                let inserted = ((ring as f64) * rw - 1.0) * res;
+                for (r0, c0) in std::mem::take(&mut pbuck[ring]) {
+                    if let Some(hp) = prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)) {
+                        // the span in this sector's coordinates
+                        let sh = to_sec(hp.lo) - hp.lo;
+                        let sh = if hp.lo + sh > b { sh - 2.0 * PI } else { sh };
+                        for w in [sh, sh + 2.0 * PI, sh - 2.0 * PI] {
+                            if hp.hi + w > a && hp.lo + w < b {
+                                let h2 = HPatch { lo: hp.lo + w, hi: hp.hi + w, slope: hp.slope, lo_in: hp.lo_in + w, hi_in: hp.hi_in + w };
+                                bins.insert(grid, s, &ang, r0, c0, &h2);
+                            }
+                        }
+                    }
+                }
+                for &(r0, c0, _) in &sblocks[k][ring] {
+                    if let Some((smax, lo, hi)) = block_bound(grid, s, r0, c0) {
+                        // the span in this sector's coordinates (the copy that meets it)
+                        let l = to_sec(lo);
+                        let l = if l > b { l - 2.0 * PI } else { l };
+                        if bins.culls(smax, l, l + (hi - lo)) || bins.culls(smax, l + 2.0 * PI, l + 2.0 * PI + (hi - lo)) {
+                            continue; // culled here: its cells in this sector hidden, patches dropped here
+                        }
+                    }
+                    for r in r0..(r0 + kb).min(rows) {
+                        for c in c0..(c0 + kb).min(cols) {
+                            let i = r * cols + c;
+                            if isr[i] {
+                                let (du, dv) = (c as f64 - s.ue, r as f64 - s.ve);
+                                let th = dv.atan2(du);
+                                if sec_of(th) == k {
+                                    let d = (du * du + dv * dv).sqrt();
+                                    let cr = ((d / rw).floor() as usize).min(last).max(ring);
+                                    let q = ((to_sec(th) - base) * (TURN as f64 / (2.0 * PI))) as u64;
+                                    cbuck[cr].push((q.min(TURN - 1), i));
+                                }
+                            }
+                            if let Some(q) = patch_ring(r as i64, c as i64) {
+                                debug_assert!(q > ring);
+                                pbuck[q].push((r as i64, c as i64));
+                            }
+                        }
+                    }
+                }
+                let mut cring = std::mem::take(&mut cbuck[ring]);
+                cring.sort_unstable();
+                let mut blocker: Option<(i64, i64)> = None;
+                for &(_, i) in &cring {
+                    let (r, c) = ((i / cols) as i64, (i % cols) as i64);
+                    let zt = grid.at(r as usize, c as usize);
+                    let cell = make_cell(s, zt, r, c);
+                    if let Some((br, bc)) = blocker {
+                        if reuse_blocks(&cell, grid, br, bc) {
+                            out.push((i, false));
+                            continue;
+                        }
+                    }
+                    let mut mid = Vec::new();
+                    let mut tail_only = false;
+                    if let Some((lo, hi, theta, widen, dist)) = target_slope(s, &cell, zt) {
+                        match bins.verdict(grid, s, lo, hi, to_sec(theta), widen) {
+                            Verdict::Hidden => {
+                                out.push((i, false));
+                                continue;
+                            }
+                            Verdict::Clear(straddle) => {
+                                // above u_near: the near patches can't block it either
+                                let t_a = if lo > u_near { 0.0 } else { (NEAR * res + 2.0 * res) / dist };
+                                let t_b = (inserted - 2.0 * res) / dist;
+                                if t_b > t_a + 0.01 {
+                                    mid = skip_intervals(&cell, s, t_a, t_b, &straddle);
+                                    tail_only = t_a == 0.0;
+                                }
+                            }
+                            Verdict::Unknown => {}
+                        }
+                    }
+                    let pyramid = !tail_only;
+                    let (st, r0, c0) = walk_impl(&cell, grid, pyr, r, c, &mut failed, &mid, &mut 0, pyramid);
+                    let visible = match st {
+                        State::Blocking => {
+                            blocker = Some((r0, c0));
+                            false
+                        }
+                        State::Undecided => !blocked_exact(grid, s, pyr, &cell, r, c),
+                        _ => true,
+                    };
+                    out.push((i, visible));
+                }
+            }
+            (out, t_sec.elapsed().as_secs_f64())
+        })
+        .collect();
+    if lap.on {
+        let mut ts: Vec<(f64, usize)> = results.iter().enumerate().map(|(k, (_, t))| (*t, k)).collect();
+        let sum: f64 = ts.iter().map(|x| x.0).sum();
+        ts.sort_by(|x, y| y.0.total_cmp(&x.0));
+        eprintln!("phase x:sector-cpu {sum:.3}s max {:.3}s top {:?}", ts[0].0, ts.iter().take(3).map(|(t, k)| format!("{k}:{t:.3}")).collect::<Vec<_>>());
+    }
+    for (v, _) in results {
+        for (i, vis) in v {
+            seen[i] = vis;
+        }
+    }
+    lap.lap("x:sectors");
+}
+
 pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
     if !grid.inside(x, y) {
         return Err(Error::ObserverOutside);
@@ -2093,22 +2560,32 @@ pub(crate) fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Ve
     let pyr = Pyramid::new(grid);
     let nlev = pyr.shapes.len();
     lap.lap("pyramid");
-    // Two exact ways through the cells: row-major chunks (neighbouring sightlines
-    // share blockers, cache lines and pyramid blocks) for small rasters, or rings with
-    // the horizon filters and hidden-block culling (HORIZON_MIN).
+    // Three exact ways through the cells: row-major chunks (neighbouring sightlines
+    // share blockers, cache lines and pyramid blocks) for small rasters; for large ones
+    // the sector-parallel horizon (sector_phase); horizon_phase (the same rings, one bin
+    // array shared by all threads) stays as a forced mode for the conformance tests.
     let mut seen = vec![false; rows * cols];
-    // VIEWSHED_MODE=rows|horizon forces a mode (the conformance tests run both)
-    let forced = match std::env::var("VIEWSHED_MODE").as_deref() {
-        Ok("rows") => Some(false),
-        Ok("horizon") => Some(true),
-        _ => None,
+    // VIEWSHED_MODE=rows|horizon|sector forces a mode (the conformance tests run each)
+    #[derive(PartialEq)]
+    enum Mode {
+        Rows,
+        Horizon,
+        Sector,
+    }
+    let mode = match std::env::var("VIEWSHED_MODE").as_deref() {
+        Ok("rows") => Mode::Rows,
+        Ok("horizon") => Mode::Horizon,
+        Ok("sector") => Mode::Sector,
+        _ if cells.len() >= HORIZON_MIN => Mode::Sector,
+        _ => Mode::Rows,
     };
-    let use_horizon = forced.unwrap_or(cells.len() >= HORIZON_MIN);
     lap.lap("mode");
     // the horizon's sort keys pack a ring (24 bits) above a patch index (40 bits)
     let fits = (rows as u64 + 1) * (cols as u64 + 1) < (1u64 << 40)
         && ((((rows * rows + cols * cols) as f64).sqrt() / RING) as u64 + 4) < (1u64 << 24);
-    if use_horizon && fits {
+    if mode == Mode::Sector && fits {
+        sector_phase(grid, &s, &pyr, &cells, &mut seen);
+    } else if mode == Mode::Horizon && fits {
         horizon_phase(grid, &s, &pyr, &cells, &mut seen);
     } else {
         let decided: Vec<(usize, bool)> = cells
