@@ -76,6 +76,38 @@ def near_lattice_jobs(n_jobs=36, seed=23):
                   bool(k % 2), 0.13, 6371008.8)
 
 
+def near_blocker_jobs(n_jobs=24, seed=29):
+    """Short walls 1-3 cells from the observer, taller than the eye, on gentle terrain:
+    targets behind them are hidden by nothing else, so the stretch of every sightline
+    nearest the observer (terrain the horizon structures leave to the walk, or bound
+    crudely) decides them."""
+    rng = np.random.default_rng(seed)
+    for k in range(n_jobs):
+        n = int(rng.integers(30, 64))
+        dem = rng.normal(0, 0.2, (n, n)).cumsum(0).cumsum(1) * 0.02 + 100.0
+        res = [1.0, 10.0, 2.0][k % 3]
+        x0, y0 = 500000.0 + 0.37, 4000000.0 + 0.61
+        gt = (x0, res, 0.0, y0, 0.0, -res)
+        c0, r0 = (int(v) for v in rng.integers(8, n - 8, 2))
+        eye = float(rng.choice([1.6, 2.0]))
+        # one to three wall stubs at 1-3 cells, a few cells long, eye-high or more
+        for _ in range(int(rng.integers(1, 4))):
+            ang = rng.uniform(0, 2 * np.pi)
+            dist = rng.uniform(1.0, 3.0)
+            wr, wc = int(round(r0 + dist * np.sin(ang))), int(round(c0 + dist * np.cos(ang)))
+            if (wr, wc) == (r0, c0):
+                continue
+            h = dem[r0, c0] + eye + float(rng.uniform(-0.3, 3.0))
+            for t in range(-2, 3):
+                rr = wr + int(round(t * np.cos(ang)))
+                cc = wc - int(round(t * np.sin(ang)))
+                if 0 <= rr < n and 0 <= cc < n and (rr, cc) != (r0, c0):
+                    dem[rr, cc] = h
+        fx, fy = [(0.5, 0.5), (0.37, 0.61), (0.0, 0.5)][k % 3]
+        obs = (x0 + (c0 + fx) * res, y0 - (r0 + fy) * res)
+        yield Job(dem, gt, obs, eye, [0.0, 0.0, 1.0][k % 3], None, bool(k % 2), 0.13, 6371008.8)
+
+
 def fixed_jobs():
     for f in datasets.DATASETS.values():
         for th in datasets.TARGET_HEIGHTS:
@@ -91,12 +123,16 @@ def _oracle(job):
                            job.max_distance, **job.curve_kwargs(), **kw)[0]
 
 
-@pytest.mark.parametrize("mode", ["rows", "horizon"])
-@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs(), *near_lattice_jobs()])
+@pytest.mark.parametrize("mode", ["rows", "horizon", "sector", "sector4"])
+@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs(), *near_lattice_jobs(), *near_blocker_jobs()])
 def test_bilinear_equals_oracle(job, mode, monkeypatch):
     # the crate picks a mode per raster (row-major walk, or rings with the horizon
     # filters); both are exact, and both are checked here on every job
-    monkeypatch.setenv("VIEWSHED_MODE", mode)
+    # "sector4": the sector-parallel mode with 4 sectors, so that culling blocks fit inside
+    # sectors (and are exercised) even on these small rasters
+    monkeypatch.setenv("VIEWSHED_MODE", "sector" if mode == "sector4" else mode)
+    if mode == "sector4":
+        monkeypatch.setenv("VIEWSHED_SECN", "4")
     try:
         theirs = _oracle(job)
     except ValueError:                    # observer on no-data
