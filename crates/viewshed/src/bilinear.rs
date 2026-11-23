@@ -1548,6 +1548,121 @@ fn bin_bounds_with(p: &Patch, s: &Setup, corner_angles: &[f64; 4], iv: &Interval
     (lb, ub)
 }
 
+/// The direction-independent parts of centre_max and bin_bounds_with for one patch,
+/// computed once and shared by all the bins the patch meets (the same expressions, so
+/// the same values as computing them per bin).
+struct PatchPoly {
+    e3: f64,
+    a: f64,
+    b: f64,
+    gamma: f64,
+    /// centre_max's size = k2 d2 + k0 + k1 / d1
+    k2: f64,
+    k0: f64,
+    k1: f64,
+    /// bin_bounds_with's gradient bound g
+    g: f64,
+}
+
+impl PatchPoly {
+    fn new(p: &Patch, s: &Setup) -> PatchPoly {
+        let (z00, z01, z10, z11) = (p.z00, p.z01, p.z10, p.z11);
+        let res = s.res;
+        let e3 = z00 - z01 - z10 + z11;
+        let (du0, dv0) = (s.ue - p.c0, s.ve - p.r0);
+        let bobs = z00 + (z01 - z00) * du0 + (z10 - z00) * dv0 + e3 * du0 * dv0;
+        let (gu, gv) = ((z01 - z00).abs(), (z10 - z00).abs());
+        let e3a = e3.abs();
+        let (eu, ev) = (1.0 + du0.abs(), 1.0 + dv0.abs());
+        PatchPoly {
+            e3,
+            a: (z01 - z00) + e3 * dv0,
+            b: (z10 - z00) + e3 * du0,
+            gamma: bobs - s.ze,
+            k2: e3a / (res * res) + s.drop.abs(),
+            k0: (gu + gv + e3a * (eu + ev)) / res,
+            k1: z00.abs() + s.ze.abs() + gu * eu + gv * ev + e3a * eu * ev,
+            g: (z01 - z00).abs().max((z11 - z10).abs()) + (z10 - z00).abs().max((z11 - z01).abs()) + 2.0 * e3a,
+        }
+    }
+}
+
+/// centre_max from a PatchPoly (the same values).
+#[inline]
+fn centre_max_pp(q: &PatchPoly, s: &Setup, cth: f64, sth: f64, d1: f64, d2: f64) -> (f64, f64) {
+    let res = s.res;
+    let alpha = q.e3 * cth * sth / (res * res) - s.drop;
+    let beta = (q.a * cth + q.b * sth) / res;
+    let gamma = q.gamma;
+    let d1 = d1.max(1e-300);
+    let v1 = alpha * d1 + beta + gamma / d1;
+    let v2 = alpha * d2 + beta + gamma / d2;
+    let mut best = v1.max(v2);
+    if alpha < 0.0 && gamma < 0.0 {
+        let ds = (gamma / alpha).sqrt();
+        if d1 < ds && ds < d2 {
+            best = best.max(beta - 2.0 * (alpha * gamma).sqrt());
+        }
+    }
+    (best, q.k2 * d2 + q.k0 + q.k1 / d1)
+}
+
+/// bin_bounds_with from a PatchPoly (the same bounds, bit for bit).
+fn bin_bounds_pp(p: &Patch, q: &PatchPoly, s: &Setup, corner_angles: &[f64; 4], iv: &Interval, mut covers: bool) -> (f64, f64) {
+    let res = s.res;
+    let (ta, tb) = (iv.ta, iv.tb);
+    let (cth, sth) = iv.cs[2];
+    let (mut d1lo, mut d1hi, mut d2lo, mut d2hi) =
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+    let mut dirs = [(0.0f64, 0.0f64); 16];
+    dirs[..3].copy_from_slice(&iv.cs);
+    let mut n = 3;
+    let pi = std::f64::consts::PI;
+    let axes = [-pi, -0.5 * pi, 0.0, 0.5 * pi, pi];
+    for &a0 in corner_angles.iter().chain(axes.iter()) {
+        for wrap in [-2.0 * pi, 0.0, 2.0 * pi] {
+            if ta < a0 + wrap && a0 + wrap < tb && n < dirs.len() {
+                let t = a0 + wrap;
+                dirs[n] = (t.cos(), t.sin());
+                n += 1;
+            }
+        }
+    }
+    let mut any = false;
+    for &(ct, st) in &dirs[..n] {
+        match stretch_d(s, p.r0, p.c0, ct, st) {
+            Some((d1, d2)) => {
+                any = true;
+                d1lo = d1lo.min(d1);
+                d1hi = d1hi.max(d1);
+                d2lo = d2lo.min(d2);
+                d2hi = d2hi.max(d2);
+            }
+            None => covers = false,
+        }
+    }
+    if !any {
+        return (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
+    let g = q.g;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let pad = 1e-9 * res + 2.0 * e_pos;
+    let slack = g * iv.tan_half * (1.0 + REL_B) / res;
+    let d_near = d1lo * iv.cos_half - pad;
+    let err_obs = if d_near > 0.0 { (g * (e_pos / res) + s.e_ze) / d_near } else { f64::INFINITY };
+    let (ub_v, size) = centre_max_pp(q, s, cth, sth, d_near.max(0.0), d2hi / iv.cos_half + pad);
+    let ub = ub_v + slack + err_obs + REL_B * (size + ub_v.abs() + slack);
+    let mut lb = f64::NEG_INFINITY;
+    if covers && d1hi < d2lo {
+        let (a, b) = (d1hi / iv.cos_half + pad, d2lo * iv.cos_half - pad);
+        if a < b {
+            let (lb_v, size) = centre_max_pp(q, s, cth, sth, a, b);
+            lb = lb_v - slack - err_obs - REL_B * (size + lb_v.abs() + slack);
+        }
+    }
+    (lb, ub)
+}
+
 /// bin_bounds for a hairline interval theta +- w (a target's direction and its error):
 /// one stretch and one closed-form evaluation, unless a patch corner falls inside the
 /// interval (then the full routine).
@@ -2127,15 +2242,26 @@ impl SBins {
         }
         let p = corners(grid, r0, c0);
         let mut angles: Option<[f64; 4]> = None;
+        let mut poly: Option<PatchPoly> = None;
         for k in a..=b {
             let li = k as usize;
             if hp.slope <= self.low[li] {
                 continue;
             }
-            let ca = *angles.get_or_insert_with(|| ang.patch(r0, c0));
-            let iv = self.iv[li];
+            let iv = &self.iv[li];
             let covers = hp.lo_in <= iv.ta && hp.hi_in >= iv.tb;
-            let (lb, ub) = bin_bounds_with(&p, s, &ca, &iv, covers);
+            // a bin the patch covers only in part can't raise `low` (that needs a lower
+            // bound over the whole bin): its candidate takes the patch's crude slope
+            // bound (hp.slope, rigorous for every point of the patch) instead of the
+            // closed form. Almost every such candidate would be kept either way; the
+            // looser bound only costs a few more ray_bounds at the targets.
+            let (lb, ub) = if covers {
+                let ca = *angles.get_or_insert_with(|| ang.patch(r0, c0));
+                let q = poly.get_or_insert_with(|| PatchPoly::new(&p, s));
+                bin_bounds_pp(&p, q, s, &ca, iv, covers)
+            } else {
+                (f64::NEG_INFINITY, hp.slope)
+            };
             if ub <= self.low[li] {
                 continue;
             }
@@ -2333,7 +2459,9 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
     };
     let sec_of = |t: f64| (((to_sec(t) - base) / width).floor() as usize).min(nsec - 1);
     let scale = (SECTORS * rows.max(cols)).next_power_of_two() as f64 / (2.0 * PI);
-    let n_rings = (((rows * rows + cols * cols) as f64).sqrt() / rw) as usize + 4;
+    // enough rings that no patch's ring is clamped to `last` (a patch reaches at most
+    // the diagonal + sqrt(2) cells; clamping would put it in the bins too early)
+    let n_rings = ((((rows * rows + cols * cols) as f64).sqrt() + 2.0) / rw) as usize + 4;
     let last = n_rings - 1;
     let mut is_target = vec![false; rows * cols];
     for &(r, c) in cells {
@@ -2406,7 +2534,9 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         if patch_dmin(s, r0, c0) < near {
             return None;
         }
-        Some(((far_hi(r0, c0) / res / rw).floor() as usize + 1).min(last))
+        let q = (far_hi(r0, c0) / res / rw).floor() as usize + 1;
+        debug_assert!(q <= last, "patch ring {q} clamped to {last}");
+        Some(q.min(last))
     };
     // VIEWSHED_CHECK (the conformance tests set it): assert the two facts the skips rest
     // on, independently of the margins meant to ensure them: every patch in the bins is
@@ -2442,7 +2572,9 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         u
     };
     let isr = &is_target;
-    let results: Vec<(Vec<(usize, bool)>, Vec<usize>, f64)> = (0..nsec)
+    // per sector: decided cells, undecided cells (settled after), CPU seconds
+    type SectorOut = (Vec<(usize, bool)>, Vec<usize>, f64);
+    let results: Vec<SectorOut> = (0..nsec)
         .into_par_iter()
         .map(|k| {
             let t_sec = std::time::Instant::now();
