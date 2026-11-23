@@ -1179,7 +1179,7 @@ const SECTORS: usize = 8; // horizon sectors per cell of raster width
 // windows and observers from map coordinates included) and at most 1.9x slower on any;
 // the row-major walk was 2.6x slower in total. Smaller rasters take the walk.
 const HORIZON_MIN: usize = 32_768;
-const RING: f64 = 4.0; // ring width in cells
+const RING: f64 = 8.0; // ring width in cells (with culling, wider rings cost less overhead than their longer walked gaps: 8 vs 4 is 2-9% faster on all eight rbench cases)
 const TURN: u64 = 1 << 40; // direction steps per turn in the cells' sort key
 const REL: f64 = 1e-12;
 
@@ -1976,7 +1976,11 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
         if cring.is_empty() {
             continue;
         }
-        cring.sort_unstable();
+        if cring.len() > 4096 {
+            cring.par_sort_unstable();
+        } else {
+            cring.sort_unstable();
+        }
         let h = &bins;
         let t0 = std::time::Instant::now();
         let results: Vec<(usize, bool)> = cring
