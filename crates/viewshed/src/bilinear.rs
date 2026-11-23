@@ -1790,6 +1790,69 @@ fn skip_intervals(cell: &Cell, s: &Setup, t_a: f64, t_b: f64, holes: &[(i64, i64
     out
 }
 
+const CULL_BLOCK: usize = 4; // cells per side of a culling block
+
+/// Hidden-block culling: is block (r0, c0) (CULL_BLOCK cells a side) certainly hidden by
+/// the bins? The block owns its cells and the patches whose (0, 0) corner is one of them;
+/// all of that lies in the square [c0, c0 + kb] x [r0, r0 + kb] (cell-centre coordinates;
+/// rows and columns past the raster are its clamped edge), with heights at most the
+/// largest of the square's cells. Every point there has slope at most slope_hi of that
+/// height over the square's distance range; culled when that is below every bin's lower
+/// bound over the square's angular span (bins: patches entirely nearer). A culled block's
+/// cells are hidden, and its patches can be left out of the bins: each of their points is
+/// below the bins' lower bound, which inserted (nearer, real) terrain attains.
+fn block_culled(bins: &Bins, grid: &Grid, s: &Setup, r0: usize, c0: usize) -> bool {
+    let kb = CULL_BLOCK;
+    let (rows, cols) = (grid.rows, grid.cols);
+    let mut hmax = f64::NEG_INFINITY;
+    for r in r0..=(r0 + kb).min(rows - 1) {
+        for c in c0..=(c0 + kb).min(cols - 1) {
+            let v = grid.at(r, c);
+            if v.is_nan() {
+                return false; // blocks touching no-data stay with the cell-by-cell path
+            }
+            hmax = hmax.max(v);
+        }
+    }
+    let res = s.res;
+    let e_pos = (s.e_ue + s.e_ve) * res;
+    let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + kb) as f64 - s.ue, r0 as f64 - s.ve, (r0 + kb) as f64 - s.ve);
+    let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
+    let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
+    let d_lo = (dx * dx + dy * dy).sqrt() * res * (1.0 - REL) - 2.0 * e_pos;
+    if d_lo < 3.0 * res {
+        return false;
+    }
+    let d_hi = far_corner(u0, u1, v0, v1) * res * (1.0 + REL) + 2.0 * e_pos;
+    let smax = slope_hi(hmax + s.th.max(0.0), s.ze - s.e_ze, s.drop, d_lo, d_hi);
+    // the square's angular span from its corners (it may reach past the vertex table)
+    let ca = [v0.atan2(u0), v0.atan2(u1), v1.atan2(u0), v1.atan2(u1)];
+    let centre = ca[0];
+    let (mut alo, mut ahi) = (0.0f64, 0.0f64);
+    for &a in &ca[1..] {
+        let mut a = a - centre;
+        if a > std::f64::consts::PI {
+            a -= 2.0 * std::f64::consts::PI;
+        } else if a < -std::f64::consts::PI {
+            a += 2.0 * std::f64::consts::PI;
+        }
+        alo = alo.min(a);
+        ahi = ahi.max(a);
+    }
+    let w = 1e-9 + 8.0 * e_pos / d_lo;
+    let (a, b) = (bins.index(centre + alo - w), bins.index(centre + ahi + w));
+    let n = bins.n as i64;
+    if b - a >= n {
+        return false;
+    }
+    for q in a..=b {
+        if !(smax < bins.low[q.rem_euclid(n) as usize]) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The deferred cells with the horizon filters, in rings of increasing distance.
 fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
     let mut lap = Lap::new();
@@ -1841,18 +1904,37 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
     lap.lap("h:patch-keys");
     let mut bins = Bins::new(SECTORS * rows.max(cols));
     let ang = Angles::new(s, rows, cols);
+    // culling blocks by the ring of their nearest point, and what culling decides: cells
+    // (hidden) and patches (left out of the bins), indexed like the patch keys
+    let kb = CULL_BLOCK;
+    let mut blocks: Vec<Vec<(usize, usize)>> = (0..n_rings).map(|_| Vec::new()).collect();
+    for r0 in (0..rows).step_by(kb) {
+        for c0 in (0..cols).step_by(kb) {
+            let (u0, u1, v0, v1) = (c0 as f64 - s.ue, (c0 + kb) as f64 - s.ue, r0 as f64 - s.ve, (r0 + kb) as f64 - s.ve);
+            let dx = if u0 > 0.0 { u0 } else if u1 < 0.0 { -u1 } else { 0.0 };
+            let dy = if v0 > 0.0 { v0 } else if v1 < 0.0 { -v1 } else { 0.0 };
+            let d = (dx * dx + dy * dy).sqrt();
+            blocks[((d / RING).floor() as usize).min(n_rings - 1)].push((r0, c0));
+        }
+    }
+    let mut cell_off = vec![false; rows * cols];
+    let mut patch_off = vec![false; (rows + 1) * (cols + 1)];
     lap.lap("h:bins-new+angles");
     let (mut t_prep, mut t_ins, mut t_q) = (0.0f64, 0.0f64, 0.0f64);
     for ring in 0..n_rings {
         // every patch entirely nearer than the ring's inner edge (less a cell)
         let inserted = ((ring as f64) * RING - 1.0) * res;
         let pring = &pkeys[patch_at[ring]..patch_at[ring + 1]];
+        let poff = &patch_off;
         if !pring.is_empty() {
             let t0 = std::time::Instant::now();
             let prepared: Vec<(i64, i64, HPatch)> = pring
                 .par_iter()
                 .filter_map(|&k| {
                     let i = k & ((1u64 << 40) - 1);
+                    if poff[i as usize] {
+                        return None; // culled: dominated by inserted terrain
+                    }
                     let (r0, c0) = ((i / pw) as i64 - 1, (i % pw) as i64 - 1);
                     prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)).map(|hp| (r0, c0, hp))
                 })
@@ -1862,10 +1944,25 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
             bins.insert_all(grid, s, &ang, &prepared);
             t_ins += t0.elapsed().as_secs_f64();
         }
+        // the blocks whose nearest point is in this ring, against the bins so far
+        let culled: Vec<(usize, usize)> = blocks[ring]
+            .par_iter()
+            .filter(|&&(r0, c0)| block_culled(&bins, grid, s, r0, c0))
+            .cloned()
+            .collect();
+        for (r0, c0) in culled {
+            for r in r0..(r0 + kb).min(rows) {
+                for c in c0..(c0 + kb).min(cols) {
+                    cell_off[r * cols + c] = true;
+                    patch_off[(r + 1) * pw as usize + (c + 1)] = true;
+                }
+            }
+        }
         let cring = &keyed[ring_at[ring]..ring_at[ring + 1]];
         if cring.is_empty() {
             continue;
         }
+        let coff = &cell_off;
         let h = &bins;
         let t0 = std::time::Instant::now();
         let results: Vec<(usize, bool)> = cring
@@ -1875,6 +1972,10 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
                 let mut blocker: Option<(i64, i64)> = None;
                 let mut out = Vec::with_capacity(chunk.len());
                 for &(_, i) in chunk {
+                    if coff[i] {
+                        out.push((i, false)); // in a culled block: hidden
+                        continue;
+                    }
                     let (r, c) = ((i / cols) as i64, (i % cols) as i64);
                     let zt = grid.at(r as usize, c as usize);
                     let cell = make_cell(s, zt, r, c);
