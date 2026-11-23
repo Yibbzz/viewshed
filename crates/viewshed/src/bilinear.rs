@@ -2088,7 +2088,7 @@ fn horizon_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], se
 const SEC_N: usize = 64;
 const SEC_SHIFT: f64 = 0.012_345_678_9; // sector ends off the axis directions
 const SEC_MARGIN: f64 = 1e-6;
-const SEC_RING: f64 = 2.0; // ring width in cells within a sector (1-8 within noise)
+const SEC_RING: f64 = 1.0; // ring width in cells within a sector (a clear target's walked tail is up to a ring longer)
 
 /// Bins over [a, b] (sector coordinates), the same width as horizon mode's.
 struct SBins {
@@ -2267,6 +2267,44 @@ fn square_span(s: &Setup, r0: usize, c0: usize, k: usize) -> (f64, f64) {
     (centre + alo, centre + ahi)
 }
 
+/// VIEWSHED_CHECK: every patch the skipped stretches `mid` cross is covered (in the
+/// bins or a culled block), a straddler (walked) or, when the target is above u_near
+/// (tail_only), nearer than `near`. Panics otherwise.
+#[allow(clippy::too_many_arguments)]
+fn check_skips(cell: &Cell, s: &Setup, mid: &[(f64, f64)], straddle: &[(i64, i64)], tail_only: bool, near: f64, (rows, cols): (i64, i64), covered: &[bool], (r, c): (i64, i64)) {
+    for &(x, y) in mid {
+        let mut ts = vec![x, y];
+        for (p0, d) in [(s.ue, cell.du), (s.ve, cell.dv)] {
+            if d != 0.0 {
+                let (a, b) = ((p0 + x * d).min(p0 + y * d), (p0 + x * d).max(p0 + y * d));
+                for k in (a.floor() as i64)..=(b.ceil() as i64) {
+                    let t = (k as f64 - p0) / d;
+                    if t > x && t < y {
+                        ts.push(t);
+                    }
+                }
+            }
+        }
+        ts.sort_by(f64::total_cmp);
+        for w in ts.windows(2) {
+            if w[1] <= w[0] {
+                continue;
+            }
+            let m = (w[0] + w[1]) / 2.0;
+            let (pr, pc) = ((s.ve + m * cell.dv).floor() as i64, (s.ue + m * cell.du).floor() as i64);
+            if pr < -1 || pc < -1 || pr >= rows || pc >= cols {
+                continue;
+            }
+            if patch_dmin(s, pr, pc) < near {
+                assert!(tail_only, "VIEWSHED_CHECK: near patch ({pr}, {pc}) skipped for target ({r}, {c}) below u_near");
+                continue;
+            }
+            let covered = covered[((pr + 1) * (cols + 1) + (pc + 1)) as usize];
+            assert!(covered || straddle.contains(&(pr, pc)), "VIEWSHED_CHECK: patch ({pr}, {pc}) skipped for target ({r}, {c}) but not in the bins (t {}..{})", w[0], w[1]);
+        }
+    }
+}
+
 /// The cells by the sector-parallel horizon (VIEWSHED_MODE=sector).
 fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], seen: &mut [bool]) {
     use std::f64::consts::PI;
@@ -2357,14 +2395,27 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
         }
     }
     lap.lap("x:route");
+    // a patch's insertion ring: the first ring whose inner edge is beyond the patch's
+    // farthest point (an upper bound, with the position errors), so every patch in the
+    // bins is strictly nearer than every target asked afterwards
+    let far_hi = |r0: i64, c0: i64| -> f64 {
+        let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
+        far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res
+    };
     let patch_ring = |r0: i64, c0: i64| -> Option<usize> {
         if patch_dmin(s, r0, c0) < near {
             return None;
         }
-        let far = far_corner(c0 as f64 - s.ue, c0 as f64 + 1.0 - s.ue, r0 as f64 - s.ve, r0 as f64 + 1.0 - s.ve);
-        let far = far * res * (1.0 + REL) + 2.0 * (s.e_ue + s.e_ve) * res;
-        Some((((far / res + 1.0) / rw).floor() as usize + 1).min(last))
+        Some(((far_hi(r0, c0) / res / rw).floor() as usize + 1).min(last))
     };
+    // VIEWSHED_CHECK (the conformance tests set it): assert the two facts the skips rest
+    // on, independently of the margins meant to ensure them: every patch in the bins is
+    // strictly nearer than every target asked afterwards, and every patch a skipped
+    // stretch crosses is in the bins, in a culled block, walked (a straddler) or, for a
+    // target above u_near, nearer than NEAR. (A margin cut by 0.01 cells fails it on
+    // most conformance jobs; the outputs themselves differ only on rare grazing cells.)
+    let check = std::env::var("VIEWSHED_CHECK").is_ok();
+    let pidx = |r0: i64, c0: i64| ((r0 + 1) * (cols_i + 1) + (c0 + 1)) as usize;
     // u_near: an upper bound on the slope of every point of the patches left out of the
     // bins (nearer than NEAR): each patch's highest corner over its distance range. A
     // clear target above it is clear of them too, so its walk can skip from the observer.
@@ -2406,9 +2457,16 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
             }
             let mut failed = vec![-1i64; nlev];
             let mut out = Vec::new();
+            let mut covered = if check { vec![false; (rows + 1) * (cols + 1)] } else { Vec::new() };
+            let mut max_far = f64::NEG_INFINITY;
             for ring in 0..n_rings {
-                let inserted = ((ring as f64) * rw - 1.0) * res;
+                // every patch whose farthest point is nearer than the ring's inner edge
+                let inserted = (ring as f64) * rw * res;
                 for (r0, c0) in std::mem::take(&mut pbuck[ring]) {
+                    if check {
+                        covered[pidx(r0, c0)] = true;
+                        max_far = max_far.max(far_hi(r0, c0));
+                    }
                     if let Some(hp) = prepare_patch(grid, s, &ang, r0, c0, patch_dmin(s, r0, c0)) {
                         // the span in this sector's coordinates
                         let sh = to_sec(hp.lo) - hp.lo;
@@ -2427,6 +2485,13 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                         let l = to_sec(lo);
                         let l = if l > b { l - 2.0 * PI } else { l };
                         if bins.culls(smax, l, l + (hi - lo)) || bins.culls(smax, l + 2.0 * PI, l + 2.0 * PI + (hi - lo)) {
+                            if check {
+                                for r in r0..(r0 + kb).min(rows) {
+                                    for c in c0..(c0 + kb).min(cols) {
+                                        covered[pidx(r as i64, c as i64)] = true;
+                                    }
+                                }
+                            }
                             continue; // culled here: its cells in this sector hidden, patches dropped here
                         }
                     }
@@ -2466,6 +2531,9 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                     let mut mid = Vec::new();
                     let mut tail_only = false;
                     if let Some((lo, hi, theta, widen, dist)) = target_slope(s, &cell, zt) {
+                        if check {
+                            assert!(max_far < dist, "VIEWSHED_CHECK: a patch reaching {max_far} is in the bins before target ({r}, {c}) at {dist}");
+                        }
                         match bins.verdict(grid, s, lo, hi, to_sec(theta), widen) {
                             Verdict::Hidden => {
                                 out.push((i, false));
@@ -2474,10 +2542,17 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                             Verdict::Clear(straddle) => {
                                 // above u_near: the near patches can't block it either
                                 let t_a = if lo > u_near { 0.0 } else { (NEAR * res + 2.0 * res) / dist };
-                                let t_b = (inserted - 2.0 * res) / dist;
+                                // a sightline point at distance x lies in a patch reaching at
+                                // most x + sqrt(2) cells; the walk's crossings are off by at
+                                // most delta in t (delta * dist <= 0.25 cells: target_slope)
+                                let pad = 1.4143 * res + 2.0 * cell.delta * dist + 1e-6 * res;
+                                let t_b = (inserted - pad) / dist;
                                 if t_b > t_a + 0.01 {
                                     mid = skip_intervals(&cell, s, t_a, t_b, &straddle);
                                     tail_only = t_a == 0.0;
+                                    if check {
+                                        check_skips(&cell, s, &mid, &straddle, tail_only, near, (rows_i, cols_i), &covered, (r, c));
+                                    }
                                 }
                             }
                             Verdict::Unknown => {}

@@ -131,6 +131,8 @@ def test_bilinear_equals_oracle(job, mode, monkeypatch):
     # "sector4": the sector-parallel mode with 4 sectors, so that culling blocks fit inside
     # sectors (and are exercised) even on these small rasters
     monkeypatch.setenv("VIEWSHED_MODE", "sector" if mode == "sector4" else mode)
+    if mode.startswith("sector"):
+        monkeypatch.setenv("VIEWSHED_CHECK", "1")  # the skips' invariants, asserted
     if mode == "sector4":
         monkeypatch.setenv("VIEWSHED_SECN", "4")
     try:
