@@ -300,16 +300,16 @@ impl<'a> Setup<'a> {
                 vertex = Some(sv);
             }
         }
-        if own && s1 == 0.0 && self.th == 0.0 {
-            // q(0) = 0 exactly; q(s) = s (qa s + qb): a zero slope at 0 can't be decided in floats
-            if qb > eb {
-                return Dec::Above;
-            }
-            if qb >= -eb {
-                ub = ub.max(0.0);
-            }
+        // T's own patch with th = 0: q(0) = 0 exactly and q(s) = s (qa s + qb). A slope qb within its
+        // error of 0 can't be decided in floats: the true qb may be slightly positive (it is a
+        // rounded sum of products), and then q > 0 on (0, qb / |qa|), a positive-length stretch.
+        // Such a patch is never Clear: Above if certified below, else a tie (exact fallback).
+        // (Review by the engine agent, 2026-11-24.)
+        let zero_slope = own && s1 == 0.0 && self.th == 0.0 && qb.abs() <= eb;
+        if own && s1 == 0.0 && self.th == 0.0 && qb > eb {
+            return Dec::Above;
         }
-        if ub <= 0.0 {
+        if ub <= 0.0 && !zero_slope {
             return Dec::Clear;
         }
         // lower bound at points certainly inside the stretch (shrunk ends, the vertex)

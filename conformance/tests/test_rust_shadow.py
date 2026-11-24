@@ -103,3 +103,18 @@ def test_cardinal_vectors_exact():
     for az, (sa, ca) in ((0, (0.0, 1.0)), (90, (1.0, 0.0)), (180, (0.0, -1.0)), (270, (-1.0, 0.0)), (360, (0.0, 1.0)), (-90, (-1.0, 0.0))):
         dx, dy, dz = so.sun_vector(gt, az, 10.0)
         assert (dx, dy) == (sa, -ca)
+
+
+def test_own_patch_inexact_zero_slope():
+    # T's own patch with th = 0: the float slope qb rounds to exactly 0 while the exact qb is
+    # +8.7e-17 (non-dyadic heights, non-lattice sun; found by search), and qa < 0: the exact
+    # q(s) = s (qa s + qb) > 0 on a short positive-length stretch -> shadowed. A float pass that
+    # treats |qb| <= its error as clear gets this wrong (engine agent's review, 2026-11-24).
+    a, b, dx, dy, dz = (-2.621, 2.251, 0.48824603611558953, 0.8727060262295744, 0.6847684043838116)
+    z = np.full((4, 4), -100.0)
+    z[1, 1], z[1, 2], z[2, 1], z[2, 2] = 0.0, a, b, -0.5 + a + b
+    gt = (0.0, 1.0, 0.0, 4.0, 0.0, -1.0)
+    want, _ = so.shadow_vec(z, gt, (dx, dy, dz), 0.0, False)
+    assert not want[1, 1]                          # the exact oracle: shadowed
+    ours, _ = rust(z, gt, 0.0, False, (dx, dy, dz))
+    assert (ours == want).all(), np.argwhere(ours != want).tolist()
