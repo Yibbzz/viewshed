@@ -5,6 +5,7 @@ All notable changes to `viewshed` (the Rust crate and the Python package, which 
 ## Unreleased
 
 ### Added
+- **Horizon maps.** `viewshed.horizon_map(dem, transform, azimuth, target_height=0.0, ...)` in Python, `viewshed::horizon_map(grid, azimuth_deg, &HorizonOptions)` in Rust: the horizon's elevation angle in degrees for every cell, exact to within 1e-9 in the tangent (certified per cell). −90 with only no-data ahead, NaN on no-data, not clamped at 0. Consistent with `shadow`. Checked against a new exact (algebraic) horizon oracle on tie-heavy and random rasters, sliver-prone directions, no-data and curvature.
 - **Exact point-to-point line of sight.** `viewshed.intervisible(dem, transform, a, b, ...)` in Python (one pair, or arrays of points, one-to-many broadcast), `viewshed::intervisible(grid, &[(Point, Point)], &LosOptions)` in Rust. Exact on the bilinear surface for endpoints anywhere, with curvature; order-independent; equal to the bilinear viewshed for cell-centre targets. Checked against a new exact oracle (`oracle.line_of_sight`) on tie-heavy rasters with endpoints on cell centres, cell corners and grid lines. About 50 µs per link (2,001 × 2,001, links up to 6 km, 4 cores).
 - `Error::PointOutside`, `PointOnNoData` and `InvalidPointHeight`, each naming the pair.
 
