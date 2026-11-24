@@ -303,8 +303,13 @@ def test_horizon_map_geometry_edges_and_shadow_consistency():
     zn = z.copy()
     zn[3, 3] = np.nan
     assert np.isnan(viewshed.horizon_map(zn, GT, 0.0)[3, 3])
-    curved = viewshed.horizon_map(np.zeros((41, 41)), (0.0, 100.0, 0.0, 4100.0, 0.0, -100.0), 90.0)
-    assert (curved[:, :-1] < 0).all()                           # the earth curves away
+    zc = np.zeros((41, 41))
+    curved = viewshed.horizon_map(zc, (0.0, 100.0, 0.0, 4100.0, 0.0, -100.0), 90.0)
+    assert (curved[:, :-1] == 0.0).all()                        # flat: the level limit beside the cell, curved or not
+    zc[20, 40] = 10.0                                           # a 10 m post 4 km east of (20, 0)
+    post = viewshed.horizon_map(zc, (0.0, 100.0, 0.0, 4100.0, 0.0, -100.0), 90.0)
+    drop = 4000.0 ** 2 * (1 - 0.13) / (2 * 6371008.8)           # the earth curves away
+    assert abs(post[20, 0] - np.degrees(np.arctan((10.0 - drop) / 4000.0))) < 1e-9
     # shadow(az, el) is lit exactly when el is above the horizon (away from ties)
     rng = np.random.default_rng(4)
     zr = rng.normal(0, 2, (40, 40)).cumsum(0)
