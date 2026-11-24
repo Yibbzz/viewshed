@@ -1,6 +1,7 @@
 """The public API: types, shapes, defaults and errors. Accuracy is checked
 cell by cell against the oracles and GRASS in ../conformance."""
 
+import math
 import threading
 
 import numpy as np
@@ -184,3 +185,81 @@ def test_reverse_viewshed_errors_name_the_target():
         viewshed.reverse_viewshed(z, GT, (5.5, 5.5), target_height=-1.0)
     with pytest.raises(ValueError, match="surface"):
         viewshed.reverse_viewshed(z, GT, (5.5, 5.5), surface="nope")
+
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+UTC = timezone.utc
+
+
+def test_sun_position_is_plausible_and_needs_a_time_zone():
+    # London, midsummer solar noon (~12:59 UTC +- a few minutes): sun due south, ~62 deg up
+    p = viewshed.sun_position(51.5, -0.13, datetime(2026, 6, 21, 12, 3, tzinfo=UTC))
+    assert abs(p.azimuth - 180.0) < 3.0 and abs(p.elevation - 62.0) < 0.5
+    assert p.elevation > p.elevation_true                     # refraction lifts the sun
+    assert viewshed.sun_position(51.5, -0.13, datetime(2026, 6, 21, 12, 3, tzinfo=UTC).timestamp()) == p
+    with pytest.raises(ValueError, match="time zone"):
+        viewshed.sun_position(51.5, -0.13, datetime(2026, 6, 21, 12, 3))
+    with pytest.raises(ValueError):
+        viewshed.sun_position(91.0, 0.0, 0.0)
+
+
+def _day():
+    return datetime(2026, 6, 21, 0, 0, tzinfo=UTC), datetime(2026, 6, 22, 0, 0, tzinfo=UTC)
+
+
+def test_sun_hours_flat_ground_gets_the_whole_day_and_a_wall_shades_its_north():
+    z = np.zeros((41, 41))
+    start, end = _day()
+    h = viewshed.sun_hours(z, GT, start, end, step=timedelta(minutes=30), lat=51.5, lon=-0.13)
+    assert h.dtype == np.float64 and h.shape == z.shape
+    day = h[20, 20]
+    assert 16.0 <= day <= 17.5 and (h == day).all()         # ~16.6 h of daylight in London
+    z[20, 10:31] = 30.0                                       # an east-west wall, 30 m high
+    z[0, 0] = np.nan
+    h = viewshed.sun_hours(z, GT, start, end, step=timedelta(minutes=30), lat=51.5, lon=-0.13)
+    assert np.isnan(h[0, 0])
+    # row 0 is north: row 18 is just north of the wall, row 22 just south of it. In a
+    # London midsummer the sun rises in the north-east and sets in the north-west, so
+    # the south side loses the early and late sun, the north side the midday sun
+    assert h[18, 20] < day - 4.0 and h[22, 20] < day - 4.0
+    midday = viewshed.sun_hours(z, GT, datetime(2026, 6, 21, 10, tzinfo=UTC),
+                                datetime(2026, 6, 21, 16, tzinfo=UTC), step=1800, lat=51.5, lon=-0.13)
+    assert midday[18, 20] == 0.0 and midday[22, 20] == 6.0 and midday[20, 5] == 6.0
+
+
+def test_sun_hours_is_the_sum_of_shadow_maps_at_its_samples():
+    rng = np.random.default_rng(3)
+    z = rng.normal(0, 3, (25, 25)).cumsum(0)
+    gt = (500000.0, 2.0, 0.0, 5650000.0, 0.0, -2.0)
+    start, end = datetime(2026, 3, 1, 6, tzinfo=UTC), datetime(2026, 3, 1, 18, tzinfo=UTC)
+    h = viewshed.sun_hours(z, gt, start, end, step=3600, lat=51.0, lon=-3.0, grid_convergence=1.5,
+                           target_height=0.5)
+    want = np.zeros(z.shape)
+    for i in range(12):
+        t = start + timedelta(minutes=30 + 60 * i)
+        p = viewshed.sun_position(51.0, -3.0, t)
+        if p.elevation > 0:
+            want += viewshed.shadow(z, gt, (p.azimuth - 1.5) % 360.0, p.elevation, target_height=0.5)
+    assert (h == want).all()
+
+
+def test_sun_hours_grid_convergence_from_crs():
+    pytest.importorskip("pyproj")
+    from viewshed import _centre_and_convergence
+    # UTM 30N, raster centred ~3 deg east of the central meridian (-3 deg) at 51 N:
+    # convergence ~ (lon - lon0) sin(lat) ~ +2.3 deg (grid north east of true north)
+    z = np.zeros((10, 10))
+    gt = (709000.0, 10.0, 0.0, 5655000.0, 0.0, -10.0)
+    lat, lon, conv = _centre_and_convergence(z, gt, "EPSG:32630")
+    assert abs(lat - 51.0) < 0.1 and abs(lon - 0.0) < 0.1
+    assert conv == pytest.approx((lon + 3.0) * math.sin(math.radians(lat)), abs=0.02)
+    start, end = _day()
+    a = viewshed.sun_hours(z, gt, start, end, step=3600, crs="EPSG:32630")
+    b = viewshed.sun_hours(z, gt, start, end, step=3600, lat=lat, lon=lon, grid_convergence=conv)
+    assert (a == b).all()
+
+
+def test_sun_hours_needs_a_place():
+    with pytest.raises(ValueError, match="lat and lon"):
+        viewshed.sun_hours(np.zeros((5, 5)), GT, *_day())

@@ -13,6 +13,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
 - **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
+- **Sun hours**: hours of direct sun per cell over a day, a season or a year, from exact shadow maps and the sun's computed position (see [Sun hours](#sun-hours)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
 | Package | Install | Code |
@@ -85,6 +86,23 @@ let lit = shadow(&grid, Sun { azimuth_deg: 135.0, elevation_deg: 30.0 }, &Shadow
 A cell is in shadow when its ray towards the sun passes strictly below the surface along a stretch of positive length; rays that leave the raster are lit, and no-data cells are `False` and never cast shadow. The result is exact for the sun's direction vector as computed from the two angles in floating point (cardinal azimuths are exact): at 45°, for example, the ray rises by `tan(45°)` = 0.9999999999999999 per unit, not 1, which can move a shadow's edge by a cell on terrain built to tie. Most cells are certified lit by a running maximum along strips in the sun's direction; the rest are decided on their own ray with rigorous rounding-error bounds, and true ties in exact rational arithmetic. Earth curvature and refraction work as for viewsheds (refraction above 1 is rejected).
 
 An exact shadow map takes about 0.5 s for 4 million cells (2,001 × 2,001 windows as above, 4 cores of an i5-8500T: 0.3–0.5 s with the sun 5–45° high). Approximate methods are faster or slower depending on the method, and differ from the exact map on a few percent of cells: a fast sampled sweep (Corripio 2003) is about 30–50 times faster and, on rough terrain at 2,001 × 2,001, differs on 0.5–1% of cells with the sun 15–30° high (missed shadow) and 1.5–2.5% at 5°; on 501 × 501 windows of rough terrain with the sun 5–30° high, GRASS `r.sunmask` differs on 1.6–4.9% of cells, mostly extra shadow within two cells of the shadow edge, and takes minutes.
+
+## Sun hours
+
+`sun_hours_between` adds up exact shadow maps over a time range: hours of direct sun per cell (`f64`, NaN on no-data). `sun_position` gives the sun's azimuth and elevation at a place and time; `sun_samples` and `sun_hours` take the sampling, or any weighted set of sun positions, into your own hands.
+
+```rust
+use viewshed::{sun_hours_between, sun_position, ShadowOptions};
+// 2026-06-21 00:00 to 2026-06-22 00:00 UTC (seconds since 1970), 15-minute steps, at 51.5 N 0.13 W
+let hours = sun_hours_between(&grid, 51.5, -0.13, 1_782_000_000.0, 1_782_086_400.0, 900.0, 0.0, &ShadowOptions::default()).unwrap();
+let sun = sun_position(51.5, -0.13, 1_782_043_200.0).unwrap();                  // azimuth_deg, elevation_deg, ...
+```
+
+Times are seconds since 1970-01-01 UTC. Each time step (default 15 minutes) uses the sun's position at the middle of the step and counts the whole step if the cell is lit; steps with the sun below the horizon count for nothing, and a last shorter step is sampled at its own middle. Each shadow map is exact for the sun position the package computes; the total over time is as fine as the step. The sun's position comes from the NOAA solar calculator equations (after Meeus), within about 0.02° of NREL's SPA for 1950–2050, and is computed once per step for the whole raster (across 50 km the sun's azimuth varies by about 0.3°). Two different refractions are involved: the sun's apparent elevation includes astronomical refraction (sunlight bending near the horizon), while `refraction` is the terrestrial coefficient used for the sightline over the curved earth, as for viewsheds.
+
+Azimuths in the raster are measured from grid north, which differs from true north by the meridian convergence (a few degrees in UTM away from the central meridian). Pass it as `grid_convergence` (grid azimuth = true azimuth − convergence). (The Python package can compute it from the raster's CRS with pyproj.)
+
+A day at 15-minute steps on 2,001 × 2,001 cells takes 15–23 s on 4 cores (about 0.3–0.4 s per daylight step); a year at hourly steps, about half an hour.
 
 ## Licence
 

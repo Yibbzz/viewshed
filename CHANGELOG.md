@@ -5,6 +5,7 @@ All notable changes to `viewshed` (the Rust crate and the Python package, which 
 ## Unreleased
 
 ### Added
+- **Sun hours.** `viewshed.sun_hours(dem, transform, start, end, step=15 min, lat, lon, crs=None, grid_convergence=None, ...)` and `viewshed.sun_position(lat, lon, time)` in Python; `sun_hours_between`, `sun_hours`, `sun_samples` and `sun_position` in Rust. Hours of direct sun per cell: exact shadow maps summed over midpoint time samples, with the sun's position from the NOAA/Meeus equations (within about 0.02° of NREL SPA). Grid north vs true north via `grid_convergence`, or from the raster's `crs` with pyproj in Python. Times must be timezone-aware.
 - **Reverse viewshed.** `viewshed.reverse_viewshed(dem, transform, target, target_height=0.0, observer_height=1.6, ...)` in Python, `viewshed::reverse_viewshed` in Rust. Returns the cells from which a target at (x, y) can be seen: for every cell, the same answer as a viewshed from that cell.
   - `surface="bilinear"`: one exact viewshed from the target with the heights swapped (sightlines, the blocking rule and the curvature drop are symmetric). Checked against the exact oracle run forwards from every cell, on tie-heavy rasters with holes and curvature, with the target on and off a cell centre.
   - `surface="rviewshed"` (default): that model isn't symmetric, so every cell looks at the target in turn, as `ztv` does. Exact for the model, but slower (about 5× an ordinary viewshed at 2,001 × 2,001).

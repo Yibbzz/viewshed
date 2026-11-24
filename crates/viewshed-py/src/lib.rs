@@ -163,12 +163,58 @@ fn shadow_py<'py>(
     Ok(PyArray1::from_vec(py, lit).reshape([rows, cols])?.into_any())
 }
 
+/// Hours of direct sun per cell (float64, the DEM's shape; NaN on no-data) for sun
+/// positions (grid azimuth, elevation, weight in hours).
+#[pyfunction(name = "sun_hours")]
+#[allow(clippy::too_many_arguments)]
+fn sun_hours_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    positions: Vec<(f64, f64, f64)>,
+    target_height: f64,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let suns: Vec<(Sun, f64)> =
+        positions.into_iter().map(|(a, e, w)| (Sun { azimuth_deg: a, elevation_deg: e }, w)).collect();
+    let opts = ShadowOptions { target_height, curvature, refraction, earth_radius };
+    let hours = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::sun_hours(&grid, &suns, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, hours).reshape([rows, cols])?.into_any())
+}
+
+/// (azimuth from true north, apparent elevation, true elevation) in degrees.
+#[pyfunction(name = "sun_position")]
+fn sun_position_py(lat: f64, lon: f64, unix_seconds: f64) -> PyResult<(f64, f64, f64)> {
+    let p = vs::sun_position(lat, lon, unix_seconds).map_err(value_error)?;
+    Ok((p.azimuth_deg, p.elevation_deg, p.elevation_true_deg))
+}
+
+/// Midpoint samples between two times: (grid azimuth, apparent elevation, weight in hours),
+/// sun-down samples left out.
+#[pyfunction(name = "sun_samples")]
+fn sun_samples_py(lat: f64, lon: f64, start: f64, end: f64, step: f64, convergence: f64) -> PyResult<Vec<(f64, f64, f64)>> {
+    let s = vs::sun_samples(lat, lon, start, end, step, convergence).map_err(value_error)?;
+    Ok(s.into_iter().map(|(sun, w)| (sun.azimuth_deg, sun.elevation_deg, w)).collect())
+}
+
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(reverse_viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(ztv_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
+    m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
+    m.add_function(wrap_pyfunction!(sun_position_py, m)?)?;
+    m.add_function(wrap_pyfunction!(sun_samples_py, m)?)?;
     m.add("MEAN_EARTH_RADIUS", vs::MEAN_EARTH_RADIUS)?;
     Ok(())
 }

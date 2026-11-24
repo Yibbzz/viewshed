@@ -13,6 +13,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
 - **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
+- **Sun hours**: hours of direct sun per cell over a day, a season or a year, from exact shadow maps and the sun's computed position (see [Sun hours](#sun-hours)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
 | Package | Install | Code |
@@ -39,6 +40,11 @@ seen_from = viewshed.reverse_viewshed(dem, gt, target=(20.5, 35.5), target_heigh
 
 # exact shadow map for a sun in the south-east, 30 degrees up
 lit = viewshed.shadow(dem, gt, azimuth=135.0, elevation=30.0)                  # bool array
+
+# hours of direct sun per cell over midsummer's day (UTM 30N raster; needs pyproj for crs=)
+from datetime import datetime, timezone
+day = datetime(2026, 6, 21, tzinfo=timezone.utc), datetime(2026, 6, 22, tzinfo=timezone.utc)
+hours = viewshed.sun_hours(dem, gt, *day, lat=51.5, lon=-0.13)                   # float array
 ```
 
 Options: `observer_height`, `target_height`, `max_distance`, `curvature` (default on), `refraction` (0.13), `earth_radius` (mean earth radius), `surface` (`"rviewshed"`, or `"bilinear"`: exact line of sight on the bilinear surface, observer at its exact point). The computation runs in Rust with the GIL released. `viewshed.reference` is the original pure-NumPy implementation, kept as an independent check.
@@ -90,6 +96,24 @@ lit = viewshed.shadow(dem, transform, azimuth=135.0, elevation=30.0)   # bool ar
 A cell is in shadow when its ray towards the sun passes strictly below the surface along a stretch of positive length; rays that leave the raster are lit, and no-data cells are `False` and never cast shadow. The result is exact for the sun's direction vector as computed from the two angles in floating point (cardinal azimuths are exact): at 45°, for example, the ray rises by `tan(45°)` = 0.9999999999999999 per unit, not 1, which can move a shadow's edge by a cell on terrain built to tie. Most cells are certified lit by a running maximum along strips in the sun's direction; the rest are decided on their own ray with rigorous rounding-error bounds, and true ties in exact rational arithmetic. Earth curvature and refraction work as for viewsheds (refraction above 1 is rejected).
 
 An exact shadow map takes about 0.5 s for 4 million cells (2,001 × 2,001 windows as above, 4 cores of an i5-8500T: 0.3–0.5 s with the sun 5–45° high). Approximate methods are faster or slower depending on the method, and differ from the exact map on a few percent of cells: a fast sampled sweep (Corripio 2003) is about 30–50 times faster and, on rough terrain at 2,001 × 2,001, differs on 0.5–1% of cells with the sun 15–30° high (missed shadow) and 1.5–2.5% at 5°; on 501 × 501 windows of rough terrain with the sun 5–30° high, GRASS `r.sunmask` differs on 1.6–4.9% of cells, mostly extra shadow within two cells of the shadow edge, and takes minutes.
+
+## Sun hours
+
+`sun_hours` adds up exact shadow maps over a time range: hours of direct sun per cell (float, NaN on no-data). `sun_position` gives the sun's azimuth and elevation at a place and time.
+
+```python
+from datetime import datetime, timedelta, timezone
+utc = timezone.utc
+hours = viewshed.sun_hours(dem, transform, datetime(2026, 6, 21, tzinfo=utc), datetime(2026, 6, 22, tzinfo=utc),
+                           step=timedelta(minutes=15), crs="EPSG:32630")       # float array, hours
+sun = viewshed.sun_position(51.5, -0.13, datetime(2026, 6, 21, 12, tzinfo=utc))  # azimuth, elevation, elevation_true
+```
+
+Times must carry a time zone (or be seconds since 1970-01-01 UTC). Each time step (default 15 minutes) uses the sun's position at the middle of the step and counts the whole step if the cell is lit; steps with the sun below the horizon count for nothing, and a last shorter step is sampled at its own middle. Each shadow map is exact for the sun position the package computes; the total over time is as fine as the step. The sun's position comes from the NOAA solar calculator equations (after Meeus), within about 0.02° of NREL's SPA for 1950–2050, and is computed once per step for the whole raster (across 50 km the sun's azimuth varies by about 0.3°). Two different refractions are involved: the sun's apparent elevation includes astronomical refraction (sunlight bending near the horizon), while `refraction` is the terrestrial coefficient used for the sightline over the curved earth, as for viewsheds.
+
+Azimuths in the raster are measured from grid north, which differs from true north by the meridian convergence (a few degrees in UTM away from the central meridian). Pass it as `grid_convergence` (grid azimuth = true azimuth − convergence), or pass the raster's `crs` (anything pyproj accepts; needs `pip install pyproj`) and it is computed at the raster's centre, which also gives `lat` and `lon` if you leave them out. Without either, grid north is taken as true north.
+
+A day at 15-minute steps on 2,001 × 2,001 cells takes 15–23 s on 4 cores (about 0.3–0.4 s per daylight step); a year at hourly steps, about half an hour.
 
 ## Releasing
 

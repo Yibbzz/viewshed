@@ -21,7 +21,8 @@ steeper. `surface="bilinear"` is exact line of sight on the bilinear surface ins
 (a mast top, a roof) be seen?
 
 `shadow` gives exact cast shadows on the same bilinear surface for a sun at a
-given azimuth and elevation.
+given azimuth and elevation, and `sun_hours` adds them up over a time range: hours
+of direct sun per cell.
 
 Earth curvature and refraction are on by default: every point is lowered by
 d^2 / (2 R) * (1 - refraction) at horizontal distance d, as in GRASS
@@ -30,12 +31,16 @@ d^2 / (2 R) * (1 - refraction) at horizontal distance d, as in GRASS
 The work is done in Rust on all CPU cores, with the GIL released.
 """
 
+import math
+from collections import namedtuple
+from datetime import datetime, timedelta
+
 import numpy as np
 
 from . import _viewshed, reference
 
 __version__ = "0.2.0"
-__all__ = ["viewshed", "reverse_viewshed", "ztv", "shadow", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "ztv", "shadow", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -161,3 +166,98 @@ def shadow(dem, transform, azimuth, elevation, target_height=0.0, curvature=True
     return _viewshed.shadow(_dem(dem), _transform(transform), float(azimuth), float(elevation),
                             float(target_height), bool(curvature), float(refraction),
                             float(earth_radius))
+
+
+SunPosition = namedtuple("SunPosition", "azimuth elevation elevation_true")
+SunPosition.__doc__ = """Degrees: azimuth clockwise from true north, apparent (refracted)
+elevation and true (geometric) elevation above the horizon."""
+
+
+def _unix(t, name):
+    if isinstance(t, datetime):
+        if t.tzinfo is None or t.utcoffset() is None:
+            raise ValueError(f"{name} needs a time zone (e.g. datetime(..., tzinfo=timezone.utc))")
+        return t.timestamp()
+    if isinstance(t, (int, float, np.integer, np.floating)) and not isinstance(t, bool):
+        return float(t)
+    raise TypeError(f"{name} must be a timezone-aware datetime or seconds since 1970-01-01 UTC")
+
+
+def _seconds(step):
+    if isinstance(step, timedelta):
+        return step.total_seconds()
+    return float(step)
+
+
+def sun_position(lat, lon, time):
+    """Where is the sun at latitude/longitude (degrees, east positive) and `time`?
+
+    time: a timezone-aware datetime, or seconds since 1970-01-01 UTC.
+    Returns SunPosition(azimuth, elevation, elevation_true) in degrees. NOAA solar
+    calculator equations (after Meeus): within about 0.02 degrees of NREL's SPA for
+    1950-2050. The apparent elevation includes astronomical refraction (sunlight bending
+    near the horizon), which is separate from the terrestrial `refraction` of sightlines.
+    """
+    return SunPosition(*_viewshed.sun_position(float(lat), float(lon), _unix(time, "time")))
+
+
+def _centre_and_convergence(dem, transform, crs):
+    try:
+        from pyproj import CRS, Transformer
+    except ImportError:
+        raise ImportError("crs= needs pyproj (pip install pyproj); or pass lat, lon and "
+                          "grid_convergence yourself") from None
+    rows, cols = np.shape(dem)
+    gt = _transform(transform)
+    x, y = gt[0] + gt[1] * cols / 2, gt[3] + gt[5] * rows / 2
+    crs = CRS.from_user_input(crs)
+    to_geo = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    from_geo = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    lon, lat = to_geo.transform(x, y)
+    d = 1e-4 if lat < 89.0 else -1e-4
+    x2, y2 = from_geo.transform(lon, lat + d)
+    if d < 0:
+        x2, y2 = 2 * x - x2, 2 * y - y2
+    # grid bearing of true north, clockwise from grid north; grid azimuth = true azimuth -
+    # convergence, so the convergence is minus that bearing
+    north = math.degrees(math.atan2(x2 - x, y2 - y))
+    return lat, lon, -north
+
+
+def sun_hours(dem, transform, start, end, step=timedelta(minutes=15), lat=None, lon=None,
+              crs=None, grid_convergence=None, target_height=0.0, curvature=True,
+              refraction=0.13, earth_radius=MEAN_EARTH_RADIUS):
+    """Hours of direct sun per cell between `start` and `end`. A float64 array shaped
+    like `dem`; no-data cells are NaN.
+
+    start, end: timezone-aware datetimes (or seconds since 1970-01-01 UTC).
+    step: sampling interval (timedelta or seconds, default 15 minutes). Each sample is
+        taken at the middle of its interval and counts for the whole interval; samples
+        with the sun below the horizon count for nothing.
+    lat, lon: where the sun's position is computed (degrees); one position per sample
+        for the whole raster (across 50 km the azimuth varies by about 0.3 degrees).
+    crs: the raster's coordinate reference system (anything pyproj accepts, e.g.
+        "EPSG:32630"). With it, lat/lon default to the raster's centre and the grid
+        convergence (the angle between grid north and true north, a few degrees in UTM
+        away from the central meridian) is computed there. Needs pyproj.
+    grid_convergence: degrees, grid azimuth = true azimuth - grid_convergence. Overrides
+        the value from `crs`; without `crs` it defaults to 0 (grid north = true north).
+    target_height, curvature, refraction, earth_radius: as for `shadow`.
+
+    Each sample's shadow map is exact (see `shadow`) for the sun position computed by
+    the package; the sum over time is a midpoint-rule estimate, as fine as `step`.
+    """
+    if crs is not None:
+        c_lat, c_lon, c_conv = _centre_and_convergence(dem, transform, crs)
+        lat = c_lat if lat is None else lat
+        lon = c_lon if lon is None else lon
+        if grid_convergence is None:
+            grid_convergence = c_conv
+    if lat is None or lon is None:
+        raise ValueError("pass lat and lon, or crs= to take them from the raster's centre")
+    _heights(("target_height", target_height))
+    samples = _viewshed.sun_samples(float(lat), float(lon), _unix(start, "start"),
+                                    _unix(end, "end"), _seconds(step),
+                                    float(grid_convergence or 0.0))
+    return _viewshed.sun_hours(_dem(dem), _transform(transform), samples, float(target_height),
+                               bool(curvature), float(refraction), float(earth_radius))
