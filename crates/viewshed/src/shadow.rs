@@ -128,7 +128,8 @@ pub fn shadow_vec(grid: &Grid, v: [f64; 3], opts: &ShadowOptions) -> Result<Vec<
     if k < 0.0 {
         return Err(Error::UnsupportedRefraction);
     }
-    let s = Setup::new(grid, dx, dy, dz, k, opts.target_height);
+    let mut s = Setup::new(grid, dx, dy, dz, k, opts.target_height);
+    s.prepare();
     Ok(s.run())
 }
 
@@ -150,6 +151,13 @@ struct Setup<'a> {
     /// the local stretch's extent in s: c0 plus a patch's along-sun extent
     s_loc: f64,
     check: bool,
+    /// patch offsets (dr, dc) the local stretch's DDA visits from any grid vertex (translation
+    /// invariant: the crossing parameters depend only on the direction)
+    stencil: Vec<(i64, i64)>,
+    /// per patch (r0, c0) at ((r0 + 1) (cols + 1) + c0 + 1): the corner-lemma bound on g (NaN for a
+    /// patch with no data) and an upper bound on the slope of B along (dx, dy) (+inf if no data)
+    pg: Vec<f64>,
+    pd: Vec<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -173,7 +181,9 @@ impl<'a> Setup<'a> {
         let res = grid.res();
         let l2 = dx * dx + dy * dy;
         let lam = dz / l2;
-        let lw = 0.25 * l2.sqrt();
+        // strip width ~ one cell (L): wider strips gather fewer copies of each patch, narrower ones
+        // certify more cells by the bound; measured best at ~L (2001^2, 4 terrains)
+        let lw = l2.sqrt();
         let w = 2f64.powi(lw.log2().round() as i32);
         let (rows, cols) = (grid.rows as f64, grid.cols as f64);
         let span = (rows + cols + 4.0) * (dx.abs() + dy.abs());
@@ -195,7 +205,119 @@ impl<'a> Setup<'a> {
             // little further only decides more patches on the ray, which is always sound
             s_loc: C0 + (dx.abs() + dy.abs()) / l2 * (1.0 + 1e-9) + 1e-9,
             check: std::env::var("VIEWSHED_SHADOW_CHECK").is_ok(),
+            stencil: Vec::new(),
+            pg: Vec::new(),
+            pd: Vec::new(),
         }
+    }
+
+    /// Fill the stencil and the per-patch arrays (parallel over patch rows).
+    fn prepare(&mut self) {
+        self.stencil = self.dda(0, 0, self.s_loc);
+        let (rows, cols) = (self.grid.rows as i64, self.grid.cols as i64);
+        let w = (cols + 1) as usize;
+        let mut pg = vec![0.0f64; w * (rows + 1) as usize];
+        let mut pd = vec![0.0f64; w * (rows + 1) as usize];
+        let me = &*self;
+        pg.par_chunks_mut(w).zip(pd.par_chunks_mut(w)).enumerate().for_each(|(i, (gr, dr))| {
+            let r0 = i as i64 - 1;
+            for (j, (g, d)) in gr.iter_mut().zip(dr.iter_mut()).enumerate() {
+                let c0 = j as i64 - 1;
+                let zc = me.corners(r0, c0);
+                if zc.iter().any(|v| v.is_nan()) {
+                    *g = f64::NAN;
+                    *d = f64::INFINITY;
+                    continue;
+                }
+                *g = me.g_bound(r0, c0, zc);
+                *d = me.slope_bound(zc);
+            }
+        });
+        self.pg = pg;
+        self.pd = pd;
+    }
+
+    #[inline]
+    fn pidx(&self, r0: i64, c0: i64) -> usize {
+        ((r0 + 1) * (self.grid.cols as i64 + 1) + c0 + 1) as usize
+    }
+
+    /// Upper bound on the directional derivative dB/ds along (dx, dy) over a patch: the derivative
+    /// (z01 - z00 + e3 v') dx + (z10 - z00 + e3 u') dy is affine in (u', v'), so its max is at a
+    /// corner, where it is a sum of two edge differences times dx, dy.
+    #[inline]
+    fn slope_bound(&self, zc: [f64; 4]) -> f64 {
+        let [z00, z01, z10, z11] = zc;
+        let (dx, dy) = (self.dx, self.dy);
+        let mut m = f64::NEG_INFINITY;
+        for (ex, ey) in [(z01 - z00, z10 - z00), (z01 - z00, z11 - z01), (z11 - z10, z10 - z00), (z11 - z10, z11 - z01)] {
+            let v = ex * dx + ey * dy;
+            // differences of floats (1 rounding each), products, one sum: well within ERR
+            m = m.max(up(v + ERR * ((ex * dx).abs() + (ey * dy).abs()) + ERR * (dx.abs() + dy.abs()) * (z00.abs() + z01.abs() + z10.abs() + z11.abs())));
+        }
+        m
+    }
+
+    /// Slope lemma: T is a grid vertex, so B(T) = z_T exactly and, B being continuous on its domain,
+    /// q(s) <= th' + s (max slope over the crossed patches - dz) with th' = -th <= 0 (the curvature
+    /// term only lowers q). If every stencil patch in the domain has slope bound <= dz, no point of
+    /// the local stretch is above T's ray: Clear. (A patch with no data has bound +inf.)
+    #[inline]
+    fn local_clear_by_slope(&self, r: i64, c: i64) -> bool {
+        let (rows, cols) = (self.grid.rows as i64, self.grid.cols as i64);
+        for &(dr, dc) in &self.stencil {
+            let (r0, c0) = (r + dr, c + dc);
+            if r0 < -1 || c0 < -1 || r0 >= rows || c0 >= cols {
+                continue;
+            }
+            let d = self.pd[self.pidx(r0, c0)];
+            if d.is_nan() || d > self.dz {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The local stretch's patch offsets from T = (r, c) (the exact-order DDA, unbounded).
+    fn dda(&self, r: i64, c: i64, smax: f64) -> Vec<(i64, i64)> {
+        let (dx, dy) = (self.dx, self.dy);
+        let mut out = Vec::new();
+        let (sx, sy) = (if dx > 0.0 { 1 } else { -1 }, if dy > 0.0 { 1 } else { -1 });
+        let mut cx = if dx > 0.0 { c } else { c - 1 };
+        let mut cy = if dy > 0.0 { r } else { r - 1 };
+        let tdx = if dx != 0.0 { (1.0 / dx).abs() } else { f64::INFINITY };
+        let tdy = if dy != 0.0 { (1.0 / dy).abs() } else { f64::INFINITY };
+        let mut tx = if dx != 0.0 { tdx } else { f64::INFINITY };
+        let mut ty = if dy != 0.0 { tdy } else { f64::INFINITY };
+        let mut t = 0.0f64;
+        while t < smax {
+            out.push((cy - r, cx - c));
+            if dx == 0.0 {
+                out.push((cy - r, cx + 1 - c));
+            }
+            if dy == 0.0 {
+                out.push((cy + 1 - r, cx - c));
+            }
+            let near = (tx - ty).abs() <= 1e-9 * tx.min(ty).max(1.0);
+            if near && tx.min(ty) < smax {
+                out.push((cy - r, cx + sx - c));
+                out.push((cy + sy - r, cx - c));
+                t = tx.max(ty);
+                cx += sx;
+                cy += sy;
+                tx += tdx;
+                ty += tdy;
+            } else if tx < ty {
+                t = tx;
+                cx += sx;
+                tx += tdx;
+            } else {
+                t = ty;
+                cy += sy;
+                ty += tdy;
+            }
+        }
+        out
     }
 
     #[inline]
@@ -222,22 +344,32 @@ impl<'a> Setup<'a> {
     /// Upper bound on g over patch (r0, c0) (corner lemma + rounding), its a_min lower bound and
     /// lateral range (widened); None if the patch has no data.
     fn entry(&self, r0: i64, c0: i64) -> Option<(f64, f64, f64, f64)> {
-        let zc = self.corners(r0, c0);
-        if zc.iter().any(|v| v.is_nan()) {
+        let g = self.pg[self.pidx(r0, c0)];
+        if g.is_nan() {
             return None;
         }
-        let (mut g, mut am, mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-        for (j, (dr, dc)) in [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+        let (mut am, mut lo, mut hi) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for (dr, dc) in [(0i64, 0i64), (0, 1), (1, 0), (1, 1)] {
             let (u, v) = ((c0 + dc) as f64, (r0 + dr) as f64);
             let a = self.a_of(u, v);
             let l = self.l_of(u, v);
-            let t = self.lam * a;
-            g = g.max(up(zc[j] - t + ERR * (zc[j].abs() + t.abs() + (u * self.dx).abs() * self.lam.abs() + (v * self.dy).abs() * self.lam.abs())));
             am = am.min(a);
             lo = lo.min(l);
             hi = hi.max(l);
         }
         Some((g, down(am - self.e_a), down(lo - self.e_l), up(hi + self.e_l)))
+    }
+
+    /// Corner-lemma upper bound on g over patch (r0, c0) with corner heights zc (no NaN).
+    fn g_bound(&self, r0: i64, c0: i64, zc: [f64; 4]) -> f64 {
+        let mut g = f64::NEG_INFINITY;
+        for (j, (dr, dc)) in [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+            let (u, v) = ((c0 + dc) as f64, (r0 + dr) as f64);
+            let a = self.a_of(u, v);
+            let t = self.lam * a;
+            g = g.max(up(zc[j] - t + ERR * (zc[j].abs() + t.abs() + (u * self.dx).abs() * self.lam.abs() + (v * self.dy).abs() * self.lam.abs())));
+        }
+        g
     }
 
     /// Patch (r0, c0) on T's ray (T = (r, c)) over s in (0, smax]: certified decision.
@@ -345,64 +477,21 @@ impl<'a> Setup<'a> {
     /// ray merely near one leaves into one side only. VIEWSHED_SHADOW_CHECK asserts the superset.
     fn walk(&self, r: i64, c: i64, smax: f64) -> Dec {
         let (rows, cols) = (self.grid.rows as i64, self.grid.cols as i64);
-        let (dx, dy) = (self.dx, self.dy);
         let mut tie = false;
         let mut seen: Vec<(i64, i64)> = Vec::new();
-        let eval = |r0: i64, c0: i64, tie: &mut bool, seen: &mut Vec<(i64, i64)>| -> bool {
+        let offs = if smax == self.s_loc { std::borrow::Cow::Borrowed(&self.stencil) } else { std::borrow::Cow::Owned(self.dda(0, 0, smax)) };
+        for &(dr, dc) in offs.iter() {
+            let (r0, c0) = (r + dr, c + dc);
             if r0 < -1 || c0 < -1 || r0 >= rows || c0 >= cols {
-                return false;
+                continue;
             }
             if self.check {
                 seen.push((r0, c0));
             }
             match self.patch_on_ray(r, c, r0, c0, smax) {
-                Dec::Above => true,
-                Dec::Tie => {
-                    *tie = true;
-                    false
-                }
-                Dec::Clear => false,
-            }
-        };
-        let (sx, sy) = (if dx > 0.0 { 1 } else { -1 }, if dy > 0.0 { 1 } else { -1 });
-        let mut cx = if dx > 0.0 { c } else { c - 1 };
-        let mut cy = if dy > 0.0 { r } else { r - 1 };
-        // crossing parameters of the next vertical (x) and horizontal (y) grid lines
-        let tdx = if dx != 0.0 { (1.0 / dx).abs() } else { f64::INFINITY };
-        let tdy = if dy != 0.0 { (1.0 / dy).abs() } else { f64::INFINITY };
-        let mut tx = if dx != 0.0 { tdx } else { f64::INFINITY };
-        let mut ty = if dy != 0.0 { tdy } else { f64::INFINITY };
-        let mut t = 0.0f64;
-        while t < smax && cx >= -1 && cy >= -1 && cx < cols && cy < rows {
-            if eval(cy, cx, &mut tie, &mut seen) {
-                return Dec::Above;
-            }
-            // a ray on a grid line: the cell across it shares a positive-length edge stretch
-            if dx == 0.0 && eval(cy, cx + 1, &mut tie, &mut seen) {
-                return Dec::Above;
-            }
-            if dy == 0.0 && eval(cy + 1, cx, &mut tie, &mut seen) {
-                return Dec::Above;
-            }
-            let near = (tx - ty).abs() <= 1e-9 * tx.min(ty).max(1.0);
-            if near && tx.min(ty) < smax {
-                // through (near) a vertex: either side cell may carry a stretch
-                if eval(cy, cx + sx, &mut tie, &mut seen) || eval(cy + sy, cx, &mut tie, &mut seen) {
-                    return Dec::Above;
-                }
-                t = tx.max(ty);
-                cx += sx;
-                cy += sy;
-                tx += tdx;
-                ty += tdy;
-            } else if tx < ty {
-                t = tx;
-                cx += sx;
-                tx += tdx;
-            } else {
-                t = ty;
-                cy += sy;
-                ty += tdy;
+                Dec::Above => return Dec::Above,
+                Dec::Tie => tie = true,
+                Dec::Clear => {}
             }
         }
         if self.check {
@@ -530,7 +619,9 @@ impl<'a> Setup<'a> {
             }
         };
         let (dx, dy) = (self.dx, self.dy);
-        let pad = 2;
+        // a patch [r0, r0 + 1] meets rows [vlo, vhi] iff r0 in [ceil(vlo) - 1, floor(vhi)]: one cell of
+        // padding covers the float error of vlo, vhi; the exact l-range filter decides membership
+        let pad = 1;
         if dx.abs() >= dy.abs() {
             // l = -u dy + v dx: v = (l + u dy) / dx
             for c0 in -1..cols {
@@ -592,8 +683,13 @@ impl<'a> Setup<'a> {
             let gt = zt - self.lam * at;
             let egt = ERR * (zt.abs() + (self.lam * at).abs() + self.lam.abs() * ((c as f64 * self.dx).abs() + (r as f64 * self.dy).abs()));
             let thr = down(gt - egt);
-            // local stretch
-            let mut tie = match self.walk(r, c, self.s_loc) {
+            // local stretch: the slope lemma certifies it without the walk where the terrain
+            // ahead is no steeper than the sun (the walk decides the rest)
+            let slope_clear = self.local_clear_by_slope(r, c);
+            if self.check && slope_clear {
+                assert!(self.walk(r, c, self.s_loc) != Dec::Above, "VIEWSHED_SHADOW_CHECK: slope lemma said clear, the walk found a blocker at ({r}, {c})");
+            }
+            let mut tie = match if slope_clear { Dec::Clear } else { self.walk(r, c, self.s_loc) } {
                 Dec::Above => {
                     out.push((i, 1u8));
                     continue;
