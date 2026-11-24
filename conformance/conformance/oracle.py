@@ -6,6 +6,14 @@ and is never visible. A cell is visible when the segment from the eye
 (surface + observer_height) to its centre (surface + target_height) is
 nowhere strictly below the surface.
 
+The surface there is made of patches (the squares between four cell centres);
+a patch with a NaN corner has no surface. The sightline meets a patch only
+along a stretch of positive length: where it merely touches a grid vertex
+(a cell centre) between two patches without surface, that point doesn't
+block, even if a neighbouring patch with data contains it. Wherever the sightline crosses patches with data, every point of
+those stretches counts, ends included. (Only lattice-exact sightlines at the
+edge of no-data areas can tell the difference; the crate does the same.)
+
 Method: the sightline is cut where it crosses the lines joining cell centres
 (Amanatides-Woo style, so no patch is skipped). Inside one bilinear patch the
 gap (line minus surface) is a quadratic in t, so its minimum is found in
