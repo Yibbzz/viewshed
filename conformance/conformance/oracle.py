@@ -119,6 +119,45 @@ def _ground_exact(z, transform, x, y):
     return None
 
 
+def line_of_sight(z, transform, a, b, curvature=False, refraction=0.13, earth_radius=6371008.8):
+    """Exact intervisibility of two points a, b = (x, y, height above the surface).
+
+    True when the segment between them is nowhere strictly below the bilinear surface
+    along a stretch of positive length (each point and the surface between lowered by the
+    curvature drop, which is symmetric: chord minus drop * d_a * d_b). Same procedure as
+    `viewshed` (segments between grid-line crossings, each in the patch holding its
+    midpoint; patches with a no-data corner have no surface), with both ends anywhere.
+    Raises ValueError if an end is outside the raster or has no surface under it."""
+    F = Fraction
+    z = np.asarray(z, dtype=float)
+    rows, cols = z.shape
+    ends = []
+    for name, p in (("a", a), ("b", b)):
+        x, y, h = (float(v) for v in p)
+        u = (F(x) - F(transform[0])) / F(transform[1]) - F(1, 2)
+        v = (F(y) - F(transform[3])) / F(transform[5]) - F(1, 2)
+        if not (-F(1, 2) <= u <= cols - F(1, 2) and -F(1, 2) <= v <= rows - F(1, 2)):
+            raise ValueError(f"point {name} is outside the raster")
+        if h < 0:
+            raise ValueError("heights must be >= 0")
+        ground = _ground_exact(z, transform, x, y)
+        if ground is None:
+            raise ValueError(f"there is no height data under point {name}")
+        ends.append((u, v, ground + F(h)))
+    (ue, ve, ze), (ub, vb, zb) = ends
+    zf = np.vectorize(lambda q: q if math.isnan(q) else F(q), otypes=[object])(z)
+    du, dv = ub - ue, vb - ve
+    res = abs(F(transform[1]))
+    bend = F(drop_factor(curvature, refraction, earth_radius)) * (du * du + dv * dv) * res * res
+    dz = zb - bend - ze
+    ts = sorted({F(0), F(1), *_crossings(ue, du), *_crossings(ve, dv)})
+    for ta, tb in zip(ts, ts[1:]):
+        m = _segment_min(zf, ue, ve, ze, du, dv, dz, ta, tb, bend=bend)
+        if m is not None and m < 0:
+            return False
+    return True
+
+
 def drop_factor(curvature, refraction, earth_radius):
     """The curvature drop at horizontal distance d is d * d * drop_factor (as in the crate)."""
     return (1.0 - refraction) / (2.0 * earth_radius) if curvature else 0.0

@@ -2,6 +2,15 @@
 
 All notable changes to `viewshed` (the Rust crate and the Python package, which share a version).
 
+## Unreleased
+
+### Added
+- **Exact point-to-point line of sight.** `viewshed.intervisible(dem, transform, a, b, ...)` in Python (one pair, or arrays of points, one-to-many broadcast), `viewshed::intervisible(grid, &[(Point, Point)], &LosOptions)` in Rust. Exact on the bilinear surface for endpoints anywhere, with curvature; order-independent; equal to the bilinear viewshed for cell-centre targets. Checked against a new exact oracle (`oracle.line_of_sight`) on tie-heavy rasters with endpoints on cell centres, cell corners and grid lines. About 50 µs per link (2,001 × 2,001, links up to 6 km, 4 cores).
+- `Error::PointOutside`, `PointOnNoData` and `InvalidPointHeight`, each naming the pair.
+
+### Deprecated
+- `viewshed::line_of_sight` (Rust): it samples the line (4 points per cell, with a tolerance), so it can miss thin blockers. Use `intervisible`.
+
 ## 0.3.0 (2026-11-24)
 
 ### Added

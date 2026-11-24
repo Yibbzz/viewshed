@@ -31,11 +31,13 @@
 use std::fmt;
 
 mod bilinear;
+mod los;
 mod shadow;
 mod sunpos;
 mod sweep;
 mod ztv;
 
+pub use los::{intervisible, LosOptions, Point};
 pub use shadow::{shadow, ShadowOptions, Sun};
 #[doc(hidden)]
 pub use shadow::shadow_vec;
@@ -72,6 +74,12 @@ pub enum Error {
     InvalidTime,
     /// A sun-hours weight that isn't a finite number >= 0.
     InvalidWeight,
+    /// A point of pair `pair` is outside the raster (or not finite).
+    PointOutside { pair: usize },
+    /// There is no height data under a point of pair `pair`.
+    PointOnNoData { pair: usize },
+    /// A point of pair `pair` has a height below zero (or not finite).
+    InvalidPointHeight { pair: usize },
 }
 
 impl fmt::Display for Error {
@@ -91,6 +99,9 @@ impl fmt::Display for Error {
             Error::InvalidWeight => write!(f, "weights must be finite and >= 0"),
             Error::InvalidTargetHeight => write!(f, "target_height must be >= 0"),
             Error::UnsupportedRefraction => write!(f, "refraction above 1 (an earth bulging upwards) is not supported for shadows"),
+            Error::PointOutside { pair } => write!(f, "pair {pair}: a point is outside the raster"),
+            Error::PointOnNoData { pair } => write!(f, "pair {pair}: there is no height data under a point"),
+            Error::InvalidPointHeight { pair } => write!(f, "pair {pair}: heights must be finite and >= 0"),
         }
     }
 }
@@ -238,6 +249,11 @@ const STEPS_PER_CELL: f64 = 4.0;
 const EPS: f64 = 1e-9;
 
 /// True if nothing on the surface rises above the line from `eye` to `target` (flat earth).
+///
+/// Sampled (4 points per cell, with a tolerance), so it can miss a thin blocker or
+/// report a grazing one; [`intervisible`] is exact, takes heights above the ground,
+/// handles curvature and many pairs at once.
+#[deprecated(since = "0.4.0", note = "sampled, not exact: use `intervisible`")]
 pub fn line_of_sight(grid: &Grid, eye: [f64; 3], target: [f64; 3]) -> bool {
     line_of_sight_curved(grid, eye, target, 0.0)
 }

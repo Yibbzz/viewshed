@@ -96,7 +96,7 @@ struct Setup {
     ze_x: BigRational,
 }
 
-fn rat(v: f64) -> BigRational {
+pub(crate) fn rat(v: f64) -> BigRational {
     BigRational::from_float(v).expect("finite")
 }
 
@@ -1016,7 +1016,7 @@ fn exact_setup(s: &Setup, z_rc: f64, r: i64, c: i64) -> Exact {
     }
 }
 
-fn ifloor(q: &BigRational) -> i64 {
+pub(crate) fn ifloor(q: &BigRational) -> i64 {
     q.floor().to_integer().to_i64().expect("patch index fits")
 }
 
@@ -1179,7 +1179,7 @@ fn blocked_exact_at(grid: &Grid, s: &Setup, cell_patches: &[(i64, i64)], r: i64,
 /// A point on a patch edge or at a grid vertex lies in two or four patches; any of
 /// them with a surface gives the same height (neighbouring patches agree along a
 /// shared edge), so the observer has ground if any patch containing it has a surface.
-fn ground_exact(grid: &Grid, ue: &BigRational, ve: &BigRational) -> Option<BigRational> {
+pub(crate) fn ground_exact(grid: &Grid, ue: &BigRational, ve: &BigRational) -> Option<BigRational> {
     let (c0, r0) = (ifloor(ue), ifloor(ve));
     let on_c = ue.is_integer();
     let on_r = ve.is_integer();

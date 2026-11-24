@@ -11,6 +11,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
+- **Point-to-point line of sight**, exact, for many pairs at once (radio links; see [Line of sight between points](#line-of-sight-between-points)).
 - **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
 - **Sun hours**: hours of direct sun per cell over a day, a season or a year, from exact shadow maps and the sun's computed position (see [Sun hours](#sun-hours)).
@@ -73,6 +74,18 @@ Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cor
 | Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
 The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
+
+## Line of sight between points
+
+`intervisible` decides exactly whether pairs of points can see each other: radio masts, sensors, any two points anywhere in the raster, each at a height above the ground.
+
+```python
+masts = [(20.5, 20.5, 30.0)]                                # (x, y, height above ground)
+sites = [(5.5, 30.5, 2.0), (35.5, 10.5, 2.0)]
+ok = viewshed.intervisible(dem, transform, masts, sites)     # bool array, one per pair
+```
+
+The model is the bilinear surface (as `surface="bilinear"`): two points see each other when the segment between them is nowhere strictly below the surface along a stretch of positive length, with earth curvature and refraction as for viewsheds. The answer doesn't depend on which point is first, and for targets on cell centres it equals the bilinear viewshed. Most of each sightline is cleared by a bound (a bilinear patch never rises above its highest corner); stretches close to the ground are decided per patch in floating point with rigorous error margins, and the rare ones within the margin in exact rational arithmetic. On a 2,001 × 2,001 raster at 10 m, 20,000 links of up to 6 km take about 1 s on a 4-core laptop (about 50 µs per link).
 
 ## Reverse viewshed
 

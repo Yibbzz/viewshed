@@ -17,6 +17,9 @@ averaged from the four cells meeting there), and a target is hidden when a
 closer cell's gradient, interpolated by angle in the target's direction, is
 steeper. `surface="bilinear"` is exact line of sight on the bilinear surface instead.
 
+`intervisible` answers exactly, for many pairs of points at once, whether each
+pair can see each other (radio links).
+
 `reverse_viewshed` turns the question round: from which cells can a target
 (a mast top, a roof) be seen?
 
@@ -40,7 +43,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.3.0"
-__all__ = ["viewshed", "reverse_viewshed", "ztv", "shadow", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "intervisible", "ztv", "shadow", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -121,6 +124,39 @@ def reverse_viewshed(dem, transform, target, target_height=0.0, observer_height=
     except ValueError as e:
         msg = str(e).replace("the observer", "the target")
         raise ValueError(msg) from None
+
+
+def intervisible(dem, transform, a, b, curvature=True, refraction=0.13,
+                 earth_radius=MEAN_EARTH_RADIUS):
+    """Can each point in `a` see the matching point in `b`? Exact line of sight.
+
+    a, b: points (x, y, height above the surface), one point or an array of shape (n, 3)
+        each (radio masts, sensors, ...). Points can be anywhere in the raster.
+    curvature, refraction, earth_radius: as for `viewshed`.
+    Returns a bool, or a bool array of length n.
+
+    Exact on the bilinear surface (as `surface="bilinear"`): visible when the segment
+    between the two points is nowhere strictly below the surface along a stretch of
+    positive length. The answer doesn't depend on which point is `a`. Pairs are decided
+    in parallel; a point outside the raster or over no-data raises ValueError naming its
+    pair.
+    """
+    pa, pb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    single = pa.ndim == 1 and pb.ndim == 1
+    pa, pb = np.atleast_2d(pa), np.atleast_2d(pb)
+    if pa.shape[1:] != (3,) or pb.shape[1:] != (3,):
+        raise ValueError("points must be (x, y, height) or arrays of shape (n, 3)")
+    if len(pa) != len(pb):
+        if len(pa) == 1:
+            pa = np.repeat(pa, len(pb), axis=0)
+        elif len(pb) == 1:
+            pb = np.repeat(pb, len(pa), axis=0)
+        else:
+            raise ValueError(f"a has {len(pa)} points and b has {len(pb)}")
+    pairs = [(tuple(p), tuple(q)) for p, q in zip(pa.tolist(), pb.tolist())]
+    seen = _viewshed.intervisible(_dem(dem), _transform(transform), pairs, bool(curvature),
+                                  float(refraction), float(earth_radius))
+    return bool(seen[0]) if single else seen
 
 
 def ztv(dem, transform, targets, observer_height=2.0, max_distance=None, method="forward",

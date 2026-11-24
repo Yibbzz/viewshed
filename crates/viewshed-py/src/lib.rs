@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use ::viewshed as vs;
-use vs::{Grid, Options, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
+use vs::{Grid, LosOptions, Options, Point, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
 
 fn value_error(e: vs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -206,12 +206,42 @@ fn sun_samples_py(lat: f64, lon: f64, start: f64, end: f64, step: f64, convergen
     Ok(s.into_iter().map(|(sun, w)| (sun.azimuth_deg, sun.elevation_deg, w)).collect())
 }
 
+type PyPair = ((f64, f64, f64), (f64, f64, f64));
+
+/// Intervisibility (bool per pair) of point pairs ((x, y, h), (x, y, h)), exact.
+#[pyfunction(name = "intervisible")]
+fn intervisible_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    pairs: Vec<PyPair>,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let pts: Vec<(Point, Point)> = pairs
+        .into_iter()
+        .map(|((ax, ay, ah), (bx, by, bh))| (Point { x: ax, y: ay, height: ah }, Point { x: bx, y: by, height: bh }))
+        .collect();
+    let opts = LosOptions { curvature, refraction, earth_radius };
+    let seen = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::intervisible(&grid, &pts, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, seen).into_any())
+}
+
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(reverse_viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(ztv_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
+    m.add_function(wrap_pyfunction!(intervisible_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_position_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_samples_py, m)?)?;

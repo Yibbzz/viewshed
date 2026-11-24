@@ -110,3 +110,70 @@ def test_reverse_viewshed_bilinear_equals_exact_oracle_from_every_cell(scene):
             assert rev[r, c] == want, (r, c)
             seen += want
     assert 0 < seen
+
+
+def _los_scenes(n_scenes=60, seed=41):
+    rng = np.random.default_rng(seed)
+    for k in range(n_scenes):
+        n = int(rng.integers(5, 16))
+        z = rng.integers(0, 4, (n, n)).astype(float) if k % 2 else \
+            np.round(rng.normal(0, 2, (n, n)).cumsum(0), 1)
+        if k % 3 == 1:
+            z[rng.random((n, n)) < 0.12] = np.nan
+        res = [1.0, 0.5, 2.0][k % 3]
+        gt = (100.0 * (k % 4), res, 0.0, 300.0 + n * res, 0.0, -res)
+
+        def point():
+            kind = int(rng.integers(0, 4))
+            if kind == 0:   # cell centre (a grid vertex of the surface)
+                c, r = rng.integers(0, n, 2) + 0.5
+            elif kind == 1:  # cell corner (a patch centre)
+                c, r = rng.integers(1, n, 2).astype(float)
+            elif kind == 2:  # on a line between cell centres
+                c, r = rng.integers(0, n) + 0.5, rng.uniform(0.5, n - 0.5)
+            else:
+                c, r = rng.uniform(0, n, 2)
+            return (gt[0] + c * res, gt[3] - r * res, float(rng.integers(0, 3)))
+
+        pairs = [(point(), point()) for _ in range(25)]
+        yield k, z, gt, pairs, bool(k % 2), 30.0 * res
+
+
+@pytest.mark.parametrize("scene", list(_los_scenes()), ids=lambda s: f"scene{s[0]}")
+def test_intervisible_equals_exact_oracle(scene):
+    """intervisible == oracle.line_of_sight (exact rationals) for endpoints on cell centres,
+    cell corners, grid lines and anywhere; tie-heavy integer rasters; no-data; curvature;
+    both orders. Invalid endpoints raise in both."""
+    import viewshed
+    from conformance import oracle
+    _, z, gt, pairs, curved, radius = scene
+    kw = dict(curvature=curved, refraction=0.13, earth_radius=radius)
+    checked = seen = 0
+    for a, b in pairs:
+        try:
+            want = oracle.line_of_sight(z, gt, a, b, **kw)
+        except ValueError:
+            with pytest.raises(ValueError):
+                viewshed.intervisible(z, gt, a, b, **kw)
+            continue
+        assert viewshed.intervisible(z, gt, a, b, **kw) == want, (a, b)
+        assert viewshed.intervisible(z, gt, b, a, **kw) == want, (b, a)
+        checked += 1
+        seen += want
+    assert checked >= 5
+
+
+def test_intervisible_batch_equals_single_calls():
+    import viewshed
+    from conformance import oracle
+    rng = np.random.default_rng(5)
+    n = 30
+    z = rng.normal(0, 3, (n, n)).cumsum(1)
+    gt = (0.0, 1.0, 0.0, float(n), 0.0, -1.0)
+    a = np.c_[rng.uniform(0, n, (200, 2)), rng.uniform(0, 5, 200)]
+    b = np.c_[rng.uniform(0, n, (200, 2)), rng.uniform(0, 5, 200)]
+    batch = viewshed.intervisible(z, gt, a, b)
+    assert batch.dtype == bool and batch.shape == (200,) and 0 < batch.sum() < 200
+    for i in range(0, 200, 7):
+        assert batch[i] == oracle.line_of_sight(z, gt, a[i], b[i], curvature=True,
+                                                refraction=0.13, earth_radius=6371008.8)

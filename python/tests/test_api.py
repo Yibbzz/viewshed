@@ -263,3 +263,26 @@ def test_sun_hours_grid_convergence_from_crs():
 def test_sun_hours_needs_a_place():
     with pytest.raises(ValueError, match="lat and lon"):
         viewshed.sun_hours(np.zeros((5, 5)), GT, *_day())
+
+
+def test_intervisible_shapes_broadcasting_and_errors():
+    z = wall()
+    mast = (20.5, 20.5, 1.6)
+    # the wall is row 15 (y = 25.5), north of the mast; larger y is further north
+    assert viewshed.intervisible(z, GT, mast, (20.5, 5.5, 0.0)) is True        # south: open
+    assert viewshed.intervisible(z, GT, mast, (20.5, 35.5, 0.0)) is False      # behind the wall
+    many = [(20.5, 5.5, 0.0), (20.5, 35.5, 0.0), (20.5, 35.5, 20.0)]   # 20 m clears the wall
+    got = viewshed.intervisible(z, GT, mast, many)                              # one to many
+    assert got.dtype == bool and got.tolist() == [True, False, True]
+    assert viewshed.intervisible(z, GT, many, mast).tolist() == got.tolist()   # order-free
+    # the same as the bilinear viewshed for cell-centre targets
+    seen = viewshed.viewshed(z, GT, (20.5, 20.5), observer_height=1.6, surface="bilinear")
+    cells = [(c + 0.5, 41 - r - 0.5, 0.0) for r in range(0, 41, 3) for c in range(0, 41, 3)]
+    assert viewshed.intervisible(z, GT, mast, cells).tolist() == \
+        [bool(seen[r, c]) for r in range(0, 41, 3) for c in range(0, 41, 3)]
+    with pytest.raises(ValueError, match="pair 1: a point is outside"):
+        viewshed.intervisible(z, GT, mast, [(1.5, 1.5, 0.0), (99.0, 1.0, 0.0)])
+    with pytest.raises(ValueError, match="pair 0: heights"):
+        viewshed.intervisible(z, GT, mast, (1.5, 1.5, -1.0))
+    with pytest.raises(ValueError, match="3 points and b has 2"):
+        viewshed.intervisible(z, GT, many, many[:2])
