@@ -46,7 +46,7 @@ import numpy as np
 
 from . import _viewshed, reference
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = ["viewshed", "reverse_viewshed", "intervisible", "cumulative", "visibility_index", "ztv", "shadow", "horizon_map", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS

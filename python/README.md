@@ -6,7 +6,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-0.3.0 (adds reverse viewsheds and sun hours, and shadow maps twice as fast). See the [repository](https://github.com/Yibbzz/viewshed) for the plan and the conformance suite that checks every result.
+0.4.0 (adds horizon maps, exact point-to-point line of sight, cumulative viewsheds and a visibility index). See the [repository](https://github.com/Yibbzz/viewshed) for the plan and the conformance suite that checks every result.
 
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.

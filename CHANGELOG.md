@@ -2,7 +2,7 @@
 
 All notable changes to `viewshed` (the Rust crate and the Python package, which share a version).
 
-## Unreleased
+## 0.4.0 (2026-11-24)
 
 ### Added
 - **Cumulative viewsheds and a visibility index.** `viewshed.cumulative(dem, transform, observers, ...)` (per cell, how many observers see it; per-observer eye heights) and `viewshed.visibility_index(dem, transform, stride, ...)` (per cell, the fraction of observers on every `stride`-th cell that see it) in Python; `viewshed::cumulative` and `viewshed::visibility_index` in Rust. Exactly the sum of one viewshed per observer, either surface, in parallel. `Error::Observer { index, error }` names a bad observer; `Error::InvalidStride`.
@@ -54,6 +54,7 @@ First release on PyPI and crates.io.
 - Rust core on all cores; abi3 wheels for Linux (x86_64, aarch64), macOS (Intel, Apple) and Windows, Python 3.9+; no GDAL, GRASS or compiler needed.
 - Conformance suite: exact bilinear oracle, independent r.viewshed-model oracle, GRASS comparisons.
 
+[0.4.0]: https://github.com/Yibbzz/viewshed/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Yibbzz/viewshed/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Yibbzz/viewshed/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Yibbzz/viewshed/releases/tag/v0.1.0
