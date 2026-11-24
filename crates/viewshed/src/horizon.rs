@@ -818,9 +818,8 @@ impl<'a> H<'a> {
             }
         }
         let (mut lo_all, mut hi_all) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-        // (patch, lo, hi within [lo, s*] at most slo, hi at most shi): the sup over the first is <= the
-        // true one <= the sup over the second
-        let mut stretches: Vec<(i64, i64, BigRational, BigRational, BigRational)> = Vec::new();
+        // (patch, lo, hi, clipped): the exact stretch is [lo, hi], or [lo, s*] when clipped (s* < hi)
+        let mut stretches: Vec<(i64, i64, BigRational, BigRational, bool)> = Vec::new();
         for (r0, c0) in cand {
             if self.corners(r0, c0).iter().any(|v| v.is_nan()) {
                 continue;
@@ -848,20 +847,13 @@ impl<'a> H<'a> {
             if !meets || hi <= lo {
                 continue;
             }
-            let (hi_in, hi_out) = if self.cut {
+            let clipped = if self.cut {
                 if lo.is_positive() && &lo * &lo * &k2 >= r2 {
                     continue; // starts at or beyond s*: no positive length within the cut
                 }
-                if &hi * &hi * &k2 > r2 {
-                    let (ql, qh) = (q(slo), q(shi));
-                    let a_ = if ql < hi { ql } else { hi.clone() };
-                    let b_ = if qh < hi { qh } else { hi.clone() };
-                    (if a_ > lo { a_ } else { lo.clone() }, b_)
-                } else {
-                    (hi.clone(), hi.clone())
-                }
+                &hi * &hi * &k2 > r2
             } else {
-                (hi.clone(), hi.clone())
+                false
             };
             // positive length certain (decided in rationals): the certified enclosure of patch_iv,
             // whose lower bound is -inf only for near-degenerate stretches; for those (now known to
@@ -869,27 +861,31 @@ impl<'a> H<'a> {
             // |f'| times that distance
             let (mut vl, vh) = self.patch_iv(r, c, r0, c0);
             if vl == f64::NEG_INFINITY {
-                let mid = (&lo + if hi_in > lo { &hi_in } else { &hi_out }) / int(2);
-                let sm = rat_to_f64(&mid);
-                vl = self.value_near(r, c, r0, c0, sm);
+                // a point certainly inside: the stretch's midpoint, or with a clip the midpoint of
+                // [lo, slo] (slo <= s*); if the stretch starts within (slo, s*], vl stays -inf and the
+                // cell goes to the exact branch below
+                let end = if clipped { q(slo) } else { hi.clone() };
+                if end > lo {
+                    let sm = rat_to_f64(&((&lo + &end) / int(2)));
+                    vl = self.value_near(r, c, r0, c0, sm);
+                }
             }
             lo_all = lo_all.max(vl);
             hi_all = hi_all.max(vh);
-            stretches.push((r0, c0, lo, hi_in, hi_out));
+            stretches.push((r0, c0, lo, hi, clipped));
         }
         if self.force_exact || hi_all > lo_all + self.tol(lo_all) || (lo_all == f64::NEG_INFINITY && hi_all > f64::NEG_INFINITY) {
             // not expected (local errors are ~1e-10 res at most), but certified anyway: every
             // patch's sup in rational arithmetic, bracketed between adjacent floats
             assert!(!self.check || self.force_exact, "VIEWSHED_HORIZON_CHECK: fallback enclosure wider than the tolerance at ({r}, {c}): [{lo_all:e}, {hi_all:e}]");
-            let (mut best, mut best_out) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-            for (r0, c0, lo, hi_in, hi_out) in &stretches {
-                best = best.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi_in));
-                if self.cut && hi_out != hi_in {
-                    best_out = best_out.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi_out));
-                }
+            let (mut best, mut best_hi) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for (r0, c0, lo, hi, clipped) in &stretches {
+                let (vl, vh) = if *clipped { self.exact_patch_sup_cut(r, c, *r0, *c0, lo) } else { self.exact_patch_sup(r, c, *r0, *c0, lo, hi) };
+                best = best.max(vl);
+                best_hi = best_hi.max(vh);
             }
-            // with a cut, s* is only bracketed: the sup up to shi must stay within the tolerance
-            assert!(!self.check || best_out <= best || best_out <= best + self.tol(best), "VIEWSHED_HORIZON_CHECK: cut bracket too wide at ({r}, {c}): {best:e} vs {best_out:e}");
+            // certified: best <= the sup <= best_hi, and each patch's bracket is within the tolerance
+            assert!(!self.check || best_hi <= best || best_hi <= best + self.tol(best), "VIEWSHED_HORIZON_CHECK: exact bracket too wide at ({r}, {c}): {best:e} vs {best_hi:e}");
             return best;
         }
         if lo_all < 0.0 && hi_all >= 0.0 {
@@ -902,7 +898,8 @@ impl<'a> H<'a> {
     /// rationals: endpoint values (the s -> 0 limit B when lo = 0 and C = 0), and the vertex
     /// B - 2 sqrt(A C) when A < 0, C < 0 and C / A lies in (lo^2, hi^2), with sqrt(A C) bracketed by a
     /// float q, q^2 <= A C <= next_up(q)^2. Returns a float lower bound within ~2 ulps of the sup.
-    fn exact_patch_sup(&self, r: i64, c: i64, r0: i64, c0: i64, lo: &BigRational, hi: &BigRational) -> f64 {
+    /// The closed form's exact coefficients (A, B, C) for patch (r0, c0) seen from T = (r, c).
+    fn exact_coeffs(&self, r: i64, c: i64, r0: i64, c0: i64) -> (BigRational, BigRational, BigRational) {
         let q = |v: f64| BigRational::from_float(v).expect("finite");
         let int = |v: i64| BigRational::from_integer(BigInt::from(v));
         let [z00, z01, z10, z11] = self.corners(r0, c0).map(q);
@@ -914,6 +911,38 @@ impl<'a> H<'a> {
         let a = &e3 * &dx * &dy - &curv;
         let b = (&z01 - &z00) * &dx + (&z10 - &z00) * &dy + &e3 * (&u0 * &dy + &v0 * &dx);
         let cc = &z00 + (&z01 - &z00) * &u0 + (&z10 - &z00) * &v0 + &e3 * &u0 * &v0 - q(self.at(r, c)) - q(self.th);
+        (a, b, cc)
+    }
+
+    /// The vertex value B - 2 sqrt(A C) bracketed between floats (lower, upper), if A < 0, C < 0 and
+    /// the vertex s^2 = C / A satisfies lo^2 < s^2 < s2max (s2max: the stretch end squared).
+    fn exact_vertex(a: &BigRational, b: &BigRational, cc: &BigRational, lo: &BigRational, s2max: &BigRational) -> Option<(f64, f64)> {
+        let q = |v: f64| BigRational::from_float(v).expect("finite");
+        let two = BigRational::from_integer(BigInt::from(2));
+        if !(a.is_negative() && cc.is_negative()) {
+            return None;
+        }
+        let m = cc / a;
+        if !(lo * lo < m && m < *s2max) {
+            return None;
+        }
+        let ac = a * cc;
+        let mut qf = rat_to_f64(&ac).sqrt();
+        while q(qf) * q(qf) > ac {
+            qf = next_dn(qf);
+        }
+        while q(next_upf(qf)) * q(next_upf(qf)) < ac {
+            qf = next_upf(qf);
+        }
+        // sqrt(AC) in [qf, next_up(qf)]
+        Some((bracket_lo(&(b - &two * q(next_upf(qf)))), bracket_hi(&(b - &two * q(qf)))))
+    }
+
+    /// The sup of A s + B + C / s over the exact stretch [lo, hi] (lo = 0 only for own patches), in
+    /// rationals, as floats (lower, upper) around it: endpoint values (the s -> 0 limit B when lo = 0
+    /// and C = 0) and the vertex.
+    fn exact_patch_sup(&self, r: i64, c: i64, r0: i64, c0: i64, lo: &BigRational, hi: &BigRational) -> (f64, f64) {
+        let (a, b, cc) = self.exact_coeffs(r, c, r0, c0);
         let f = |s: &BigRational| &a * s + &b + &cc / s;
         let mut vals: Vec<BigRational> = vec![f(hi)];
         if lo.is_positive() {
@@ -921,27 +950,78 @@ impl<'a> H<'a> {
         } else if cc.is_zero() {
             vals.push(b.clone());
         }
-        let mut best = f64::NEG_INFINITY;
+        let (mut vl, mut vh) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
         for v in &vals {
-            best = best.max(bracket_lo(v));
+            vl = vl.max(bracket_lo(v));
+            vh = vh.max(bracket_hi(v));
         }
-        if a.is_negative() && cc.is_negative() {
-            let m = &cc / &a;
-            if lo * lo < m && m < hi * hi {
-                let ac = &a * &cc;
-                let mut qf = rat_to_f64(&ac).sqrt();
-                while q(qf) * q(qf) > ac {
-                    qf = next_dn(qf);
-                }
-                while q(next_upf(qf)) * q(next_upf(qf)) < ac {
-                    qf = next_upf(qf);
-                }
-                // sqrt(AC) in [qf, next_up(qf)]: the vertex value is >= B - 2 next_up(qf)
-                let v = &b - int(2) * q(next_upf(qf));
-                best = best.max(bracket_lo(&v));
+        if let Some((xl, xh)) = Self::exact_vertex(&a, &b, &cc, lo, &(hi * hi)) {
+            vl = vl.max(xl);
+            vh = vh.max(xh);
+        }
+        (vl, vh)
+    }
+
+    /// As exact_patch_sup over [lo, s*], s* = R / (res L) (irrational in general; review 2026-11-24):
+    /// s*^2 = R^2 / (res^2 L^2) is rational (the vertex test is exact), and f(s*) = A s* + B + C / s* is
+    /// bracketed by bracketing L = sqrt(L^2) between rationals (A s and C / s are monotone in s, so
+    /// their extremes over the s* bracket are at its ends); the bracket is narrowed by bisection until
+    /// the result is within the tolerance.
+    fn exact_patch_sup_cut(&self, r: i64, c: i64, r0: i64, c0: i64, lo: &BigRational) -> (f64, f64) {
+        let q = |v: f64| BigRational::from_float(v).expect("finite");
+        let two = BigRational::from_integer(BigInt::from(2));
+        let (a, b, cc) = self.exact_coeffs(r, c, r0, c0);
+        let (dx, dy) = (q(self.dx), q(self.dy));
+        let l2 = &dx * &dx + &dy * &dy;
+        let (rq, resq) = (q(self.rmax), q(self.res));
+        let s2 = &rq * &rq / (&resq * &resq * &l2);
+        // sqrt(L^2) between adjacent floats, then bisected in rationals as needed
+        let mut lf = rat_to_f64(&l2).sqrt();
+        while q(lf) * q(lf) > l2 {
+            lf = next_dn(lf);
+        }
+        while q(next_upf(lf)) * q(next_upf(lf)) < l2 {
+            lf = next_upf(lf);
+        }
+        let (mut llo, mut lhi) = (q(lf), q(next_upf(lf)));
+        let mut fixed: Vec<BigRational> = Vec::new();
+        if lo.is_positive() {
+            fixed.push(&a * lo + &b + &cc / lo);
+        } else if cc.is_zero() {
+            fixed.push(b.clone());
+        }
+        let vert = Self::exact_vertex(&a, &b, &cc, lo, &s2);
+        let mut iter = 0;
+        loop {
+            // s* in [R / (res lhi), R / (res llo)]
+            let (sl, sh) = (&rq / (&resq * &lhi), &rq / (&resq * &llo));
+            let (as_l, as_h) = (&a * &sl, &a * &sh);
+            let (cs_l, cs_h) = (&cc / &sl, &cc / &sh);
+            let flo = &b + if as_l < as_h { &as_l } else { &as_h } + if cs_l < cs_h { &cs_l } else { &cs_h };
+            let fhi = &b + if as_l > as_h { &as_l } else { &as_h } + if cs_l > cs_h { &cs_l } else { &cs_h };
+            let (mut vl, mut vh) = (bracket_lo(&flo), bracket_hi(&fhi));
+            for v in &fixed {
+                vl = vl.max(bracket_lo(v));
+                vh = vh.max(bracket_hi(v));
             }
+            if let Some((xl, xh)) = vert {
+                vl = vl.max(xl);
+                vh = vh.max(xh);
+            }
+            if !vl.is_finite() || vh <= vl + self.tol(vl) || iter >= 200 {
+                return (vl, vh);
+            }
+            // narrow L's bracket: bisect (several steps per round)
+            for _ in 0..16 {
+                let mid = (&llo + &lhi) / &two;
+                if &mid * &mid <= l2 {
+                    llo = mid;
+                } else {
+                    lhi = mid;
+                }
+            }
+            iter += 1;
         }
-        best
     }
 
     /// A certified lower bound on f at the exact stretch point nearest to the float s (within one
@@ -988,6 +1068,11 @@ fn bracket_lo(x: &BigRational) -> f64 {
         f = next_dn(f);
     }
     f
+}
+
+/// The smallest float >= x.
+fn bracket_hi(x: &BigRational) -> f64 {
+    -bracket_lo(&-x)
 }
 
 fn rat_to_f64(x: &BigRational) -> f64 {
