@@ -1,0 +1,33 @@
+# Changelog
+
+All notable changes to `viewshed` (the Rust crate and the Python package, which share a version).
+
+## 0.2.0 (2026-11-24)
+
+### Added
+- **Exact cast-shadow maps.** `viewshed.shadow(dem, transform, azimuth, elevation, target_height=0.0, curvature=True, refraction=0.13)` in Python, `viewshed::shadow` in Rust. Returns every cell as lit or in shadow for a sun at the given azimuth (degrees clockwise from north) and elevation.
+  - Exact on the bilinear surface, the same one as `surface="bilinear"` viewsheds. A cell is in shadow when its ray towards the sun passes strictly below the surface along a stretch of positive length. Rays that leave the raster are lit. No-data cells are `False` and never cast shadow. Earth curvature and refraction work as they do for viewsheds.
+  - Exact for the sun direction as computed from the two angles in floating point. Cardinal azimuths are exact.
+  - About 1 s for 4 million cells (2,001 × 2,001, 4 cores: 0.6–0.7 s with the sun 15–45° high, 1.1 s at 5°).
+  - Approximate tools differ from the exact map on rough terrain: GRASS `r.sunmask` on 1.6–4.9% of cells (and takes minutes); a fast sampled sweep (Corripio 2003, about 50–100× faster) on 0.5–2.5%.
+  - New conformance oracle (exact rational arithmetic plus a fast float pass), tested on tie-heavy and random rasters × 16 sun positions.
+
+### Changed
+- Exact bilinear viewsheds: in sector mode, the exact pass now decides only the patches the walk left undecided, instead of walking the whole sightline again in floats. Results are bit-identical, and cases that hit the exact fallback run up to 25% faster.
+- CI actions updated to Node 24.
+
+### Breaking (Rust only)
+- `viewshed::Error` is `#[non_exhaustive]` and has new variants `InvalidSun`, `InvalidTargetHeight` and `UnsupportedRefraction`. A `match` on `Error` needs a `_ =>` arm. Python is unaffected: invalid arguments still raise `ValueError`.
+
+## 0.1.0 (2026-11-24)
+
+First release on PyPI and crates.io.
+
+- `viewshed.viewshed`: single-observer viewsheds on the GRASS `r.viewshed` surface model (matches GRASS 8.4 on every cell, with and without earth curvature and refraction), or `surface="bilinear"` for exact line of sight on the bilinear surface.
+- `viewshed.ztv`: wind-farm zones of theoretical visibility (counts of visible targets per cell), `method="forward"` (the definition) or `"reciprocal"` (one viewshed per target).
+- Earth curvature and refraction on by default; `observer_height`, `target_height` and `max_distance` options.
+- Rust core on all cores; abi3 wheels for Linux (x86_64, aarch64), macOS (Intel, Apple) and Windows, Python 3.9+; no GDAL, GRASS or compiler needed.
+- Conformance suite: exact bilinear oracle, independent r.viewshed-model oracle, GRASS comparisons.
+
+[0.2.0]: https://github.com/Yibbzz/viewshed/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Yibbzz/viewshed/releases/tag/v0.1.0

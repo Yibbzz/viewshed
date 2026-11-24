@@ -6,7 +6,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-0.2.0 on PyPI and crates.io (0.2.0 adds exact shadow maps). See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every result is checked.
+0.2.0 on PyPI and crates.io (0.2.0 adds exact shadow maps; see [CHANGELOG.md](CHANGELOG.md)). See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every result is checked.
 
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
@@ -78,7 +78,7 @@ An exact shadow map takes about 1 s for 4 million cells (2,001 × 2,001 windows 
 
 ## Releasing
 
-The version is written in four places (`crates/viewshed/Cargo.toml`, `crates/viewshed-py/Cargo.toml`, `python/pyproject.toml`, `python/viewshed/__init__.py`); `python scripts/check_versions.py` checks they agree. Pushing a tag `vX.Y.Z` that matches runs the `wheels` workflow: it builds abi3 wheels for Linux (x86_64, aarch64), macOS (Intel, Apple) and Windows, installs and tests each one on Python 3.9 and 3.13, then publishes to PyPI (trusted publishing, `pypi` environment) and crates.io (`CARGO_REGISTRY_TOKEN` in the `crates-io` environment). Nothing is published if the versions and tag disagree or any test fails.
+The version is written in four places (`crates/viewshed/Cargo.toml`, `crates/viewshed-py/Cargo.toml`, `python/pyproject.toml`, `python/viewshed/__init__.py`); `python scripts/check_versions.py` checks they agree. Add the release to `CHANGELOG.md`. Pushing a tag `vX.Y.Z` that matches runs the `wheels` workflow: it builds abi3 wheels for Linux (x86_64, aarch64), macOS (Intel, Apple) and Windows, installs and tests each one on Python 3.9 and 3.13, then publishes to PyPI (trusted publishing, `pypi` environment) and crates.io (`CARGO_REGISTRY_TOKEN` in the `crates-io` environment). Nothing is published if the versions and tag disagree or any test fails.
 
 ## Licence
 
