@@ -31,12 +31,16 @@
 use std::fmt;
 
 mod bilinear;
+mod horizon;
 mod los;
 mod shadow;
 mod sunpos;
 mod sweep;
 mod ztv;
 
+pub use horizon::{horizon_map, HorizonOptions};
+#[doc(hidden)]
+pub use horizon::horizon_rise_vec;
 pub use los::{intervisible, LosOptions, Point};
 pub use shadow::{shadow, ShadowOptions, Sun};
 #[doc(hidden)]

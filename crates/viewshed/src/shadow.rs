@@ -27,21 +27,21 @@ use rayon::prelude::*;
 
 use crate::{Error, Grid, MEAN_EARTH_RADIUS};
 
-const U: f64 = f64::EPSILON / 2.0;
+pub(crate) const U: f64 = f64::EPSILON / 2.0;
 /// A generous multiple of the unit roundoff for the short sums and products below (each value
 /// is a sum of at most ~8 products of at most 4 exact floats: gamma_16 would do; 64 U is safe).
-const ERR: f64 = 64.0 * U;
+pub(crate) const ERR: f64 = 64.0 * U;
 /// Local stretch in ray-parameter units beyond the patch extent: c0 in the notes.
-const C0: f64 = 1.0;
+pub(crate) const C0: f64 = 1.0;
 
 /// Outward rounding of a margin-adjusted value: the final add/sub of a margin rounds too (review
 /// point 1); moving a few ulps further keeps the comparison on the safe side.
 #[inline]
-fn up(x: f64) -> f64 {
+pub(crate) fn up(x: f64) -> f64 {
     x + (x.abs() * 4.0 * U + f64::MIN_POSITIVE)
 }
 #[inline]
-fn down(x: f64) -> f64 {
+pub(crate) fn down(x: f64) -> f64 {
     x - (x.abs() * 4.0 * U + f64::MIN_POSITIVE)
 }
 
@@ -60,26 +60,36 @@ impl Sun {
         if !(self.elevation_deg > 0.0 && self.elevation_deg < 90.0) || !self.azimuth_deg.is_finite() {
             return Err(Error::InvalidSun);
         }
-        // cardinal azimuths exactly (sin 180 deg is 1.2e-16 in floats: a ray a hair off the grid
-        // line, while 0 deg is exactly on it); other angles through sin/cos. Exact for the
-        // resulting float vector, as the oracle's sun_vector (same rule).
-        let a = self.azimuth_deg.rem_euclid(360.0);
-        let (sa, ca) = if a == 0.0 {
-            (0.0, 1.0)
-        } else if a == 90.0 {
-            (1.0, 0.0)
-        } else if a == 180.0 {
-            (0.0, -1.0)
-        } else if a == 270.0 {
-            (-1.0, 0.0)
-        } else {
-            let r = a.to_radians();
-            (r.sin(), r.cos())
-        };
-        let t = grid.transform;
-        let res = grid.res();
-        Ok([sa * (res / t[1]), ca * (res / t[5]), self.elevation_deg.to_radians().tan() * res])
+        let [dx, dy] = azimuth_vector(grid, self.azimuth_deg)?;
+        Ok([dx, dy, self.elevation_deg.to_radians().tan() * grid.res()])
     }
+}
+
+/// The horizontal direction `(dx, dy)` (columns, rows per unit ray parameter; a step of one cell)
+/// for an azimuth clockwise from north, signs from the geotransform. Cardinal azimuths are exact
+/// (sin 180 deg is 1.2e-16 in floats: a ray a hair off the grid line, while 0 deg is exactly on
+/// it); other angles through sin/cos. Exact for the resulting float vector, as the oracle's
+/// sun_vector (same rule).
+pub(crate) fn azimuth_vector(grid: &Grid, azimuth_deg: f64) -> Result<[f64; 2], Error> {
+    if !azimuth_deg.is_finite() {
+        return Err(Error::InvalidSun);
+    }
+    let a = azimuth_deg.rem_euclid(360.0);
+    let (sa, ca) = if a == 0.0 {
+        (0.0, 1.0)
+    } else if a == 90.0 {
+        (1.0, 0.0)
+    } else if a == 180.0 {
+        (0.0, -1.0)
+    } else if a == 270.0 {
+        (-1.0, 0.0)
+    } else {
+        let r = a.to_radians();
+        (r.sin(), r.cos())
+    };
+    let t = grid.transform;
+    let res = grid.res();
+    Ok([sa * (res / t[1]), ca * (res / t[5])])
 }
 
 /// Shadow settings. Curvature and refraction as in [`crate::Options`].
