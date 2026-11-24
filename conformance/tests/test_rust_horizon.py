@@ -71,10 +71,20 @@ def rasters():
             z[rng.random(z.shape) < 0.1] = np.nan
         res = [1.0, 10.0, 0.5][k % 3]
         yield f"rand{k}", z, (500000.37, res, 0.0, 4000000.61, 0.0, -res)
+    # tilted planes (the lateral detrend: exact ties after it; tie pruning), with noise and holes
+    for k, (gx, gy, sd) in enumerate([(0.37, -0.21, 0.0), (-0.13, 0.29, 0.0), (0.3, 0.1, 1e-3), (0.05, -0.4, 0.05)]):
+        m = 13 + k
+        y, x = np.mgrid[0:m, 0:m]
+        z = 7.25 + gx * x + gy * y + np.round(rng.normal(0, sd, (m, m)), 4)
+        if k == 3:
+            z[rng.random(z.shape) < 0.08] = np.nan
+        res = [1.0, 10.0, 0.5, 2.0][k]
+        yield f"plane{k}", z, (500000.37, res, 0.0, 4000000.61, 0.0, -res)
 
 
 PATHS = {"main": None, "fallback": {"VIEWSHED_HORIZON_FALLBACK_ALL": "1"},
-         "exact": {"VIEWSHED_HORIZON_FALLBACK_ALL": "1", "VIEWSHED_HORIZON_EXACT_ALL": "1"}}
+         "exact": {"VIEWSHED_HORIZON_FALLBACK_ALL": "1", "VIEWSHED_HORIZON_EXACT_ALL": "1"},
+         "strict": {"VIEWSHED_HORIZON_NODETREND": "1", "VIEWSHED_HORIZON_NOTIE": "1"}}
 
 
 @pytest.mark.parametrize("fallback", list(PATHS))

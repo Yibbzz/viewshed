@@ -95,11 +95,16 @@ struct H<'a> {
     force_fallback: bool,
     /// test hook (VIEWSHED_HORIZON_EXACT_ALL, with the above): the fallback's rational branch for all
     force_exact: bool,
+    /// lateral detrend of the hull points (VIEWSHED_HORIZON_NODETREND turns it off: tests, timing)
+    detrend: bool,
+    /// prune ties within tol/2 (VIEWSHED_HORIZON_NOTIE turns it off)
+    tie: bool,
 }
 
 /// One patch in a strip: its corners' (a, z) sorted by a, a_min (rounded down), position.
 struct Ent {
     amin: f64,
+    /// (a, z) per corner; after the strip's detrend, (a, z - beta (l - l_mid)) rounded (see `strip`)
     pts: [(f64, f64); 4],
     r0: i32,
     c0: i32,
@@ -132,6 +137,8 @@ impl<'a> H<'a> {
             check: std::env::var("VIEWSHED_HORIZON_CHECK").is_ok(),
             force_fallback: std::env::var("VIEWSHED_HORIZON_FALLBACK_ALL").is_ok(),
             force_exact: std::env::var("VIEWSHED_HORIZON_EXACT_ALL").is_ok(),
+            detrend: std::env::var("VIEWSHED_HORIZON_NODETREND").is_err(),
+            tie: std::env::var("VIEWSHED_HORIZON_NOTIE").is_err(),
         };
         h.stencil = h.dda(0, 0, h.s_loc, false);
         h
@@ -461,7 +468,10 @@ impl<'a> H<'a> {
     fn strip(&self, j: i64, targets: &[u32]) -> Vec<(u32, f64, bool)> {
         let (rows, cols, dx, dy) = (self.rows, self.cols, self.dx, self.dy);
         let (l0, l1) = (j as f64 * self.w, (j + 1) as f64 * self.w);
+        let lmid = (j as f64 + 0.5) * self.w;
         let mut ents: Vec<Ent> = Vec::new();
+        // per-patch lateral slopes dz/dl (the strip's median becomes beta)
+        let mut grads: Vec<f64> = Vec::new();
         let mut push = |r0: i64, c0: i64| {
             if !self.inside(r0, c0) {
                 return;
@@ -482,7 +492,9 @@ impl<'a> H<'a> {
                 pts[k] = (a, zc[k]);
             }
             if up(hi + self.e_l) >= l0 && down(lo - self.e_l) <= l1 {
-                pts.sort_by(|x, y| x.0.total_cmp(&y.0));
+                let [z00, z01, z10, z11] = zc;
+                let (gx, gy) = (0.5 * (z01 - z00 + z11 - z10), 0.5 * (z10 - z00 + z11 - z01));
+                grads.push((-dy * gx + dx * gy) / self.l2);
                 ents.push(Ent { amin: down(am - self.e_a), pts, r0: r0 as i32, c0: c0 as i32 });
             }
         };
@@ -509,6 +521,35 @@ impl<'a> H<'a> {
                 }
             }
         }
+        // Lateral detrend (any beta is sound): bilinear weights reproduce the affine a and l, so on
+        // T's ray (l = l_T) B - lam' a <= beta (l_T - l_mid) + max_k (z_k - beta (l_k - l_mid) - lam' a_k).
+        // Removes a strip-wide lateral tilt from the corner bound (on a tilted plane it is the whole
+        // slack: slope x patch width, ~1e7 x the tolerance). Stored z'_k = fl(z_k - fl(beta lt_k)),
+        // lt_k = fl(fl(l_k) - l_mid): |z'_k - (z_k - beta (l_k - l_mid))| <= e_beta (below).
+        let beta = if self.detrend && !grads.is_empty() {
+            let k = grads.len() / 2;
+            let b = *grads.select_nth_unstable_by(k, |x, y| x.total_cmp(y)).1;
+            if b.is_finite() { b } else { 0.0 }
+        } else {
+            0.0
+        };
+        let (mut zabs, mut tmax) = (0.0f64, 0.0f64);
+        for e in ents.iter_mut() {
+            if beta != 0.0 {
+                // corners in (0,0), (0,1), (1,0), (1,1) order, as pushed (pts not yet sorted)
+                for (k, (dr, dc)) in [(0i64, 0i64), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+                    let lt = self.l_of((e.c0 as i64 + dc) as f64, (e.r0 as i64 + dr) as f64) - lmid;
+                    zabs = zabs.max(e.pts[k].1.abs());
+                    tmax = tmax.max(lt.abs());
+                    e.pts[k].1 -= beta * lt;
+                }
+            }
+            e.pts.sort_by(|x, y| x.0.total_cmp(&y.0));
+        }
+        // fl(l) error e_l, fl(l - l_mid) <= U |lt|, product and difference rounding
+        let e_beta = if beta == 0.0 { 0.0 } else { up(beta.abs() * (self.e_l + 2.0 * U * tmax) + 4.0 * U * (zabs + beta.abs() * tmax)) };
+        // magnitude of stored hull values, for the rounding margins (never below the raster's)
+        let zm = self.zmax.max(up(zabs + beta.abs() * tmax + e_beta + self.th.abs()));
         ents.sort_unstable_by(|x, y| y.amin.total_cmp(&x.amin));
         let m = ents.len();
         let p2 = m.next_power_of_two().max(1);
@@ -545,7 +586,7 @@ impl<'a> H<'a> {
             if hr[nd].1 > hr[nd].0 {
                 // + 16 U Zmax: kept vertices are concave only up to the orientation test's rounding,
                 // so a child's envelope can exceed this node's by that much between measured points
-                dd[nd] = up(deficit(&merged, &hpts[st..]) + dd[2 * nd].max(dd[2 * nd + 1]) + 16.0 * U * self.zmax);
+                dd[nd] = up(deficit(&merged, &hpts[st..]) + dd[2 * nd].max(dd[2 * nd + 1]) + 16.0 * U * zm);
             }
         }
         // targets: a-cut key a_T + C0 L^2 (rounded up), descending
@@ -595,7 +636,15 @@ impl<'a> H<'a> {
             }
             let zt = self.grid.z[i as usize] + self.th;
             let at = self.a_of(c as f64, r as f64);
+            // beta (l_T - l_mid) moves to the right-hand side, with its rounding (as e_beta)
+            // (fl(l_T) error e_l; fl(l_T - l_mid) and the product: <= 2U |lt_T| |beta| + U |bt|)
+            let lt_t = self.l_of(c as f64, r as f64) - lmid;
+            let bt = beta * lt_t;
+            let e_bt = if beta == 0.0 { 0.0 } else { up(beta.abs() * (self.e_l + 4.0 * U * lt_t.abs()) + 4.0 * U * bt.abs()) };
             if jj > 0 {
+                // per-lo quantities, recomputed only when lo rises (not per node visit)
+                let mut lo_c = f64::NAN;
+                let (mut lp, mut mg, mut rhs) = (0.0, 0.0, 0.0);
                 stack.clear();
                 stack.push((1, 0, p2));
                 while let Some((nd, nlo, nhi)) = stack.pop() {
@@ -603,10 +652,18 @@ impl<'a> H<'a> {
                         continue;
                     }
                     if lo > f64::NEG_INFINITY {
-                        // lam' with L^2 lam' <= lo (fl(L^2) has rel. error <= 2U)
-                        let lp = if lo >= 0.0 { down(lo / (self.l2 * (1.0 + 4.0 * U))) } else { down(lo / (self.l2 * (1.0 - 4.0 * U))) };
-                        let bound = up(hull_max(&hpts[hr[nd].0..hr[nd].1], lp) + dd[nd] + self.margin(lp));
-                        let rhs = down(zt - lp * at - ERR * (zt.abs() + (lp * at).abs()) - lp.abs() * self.e_a);
+                        // prune against t <= lo + tol(lo)/2, not lo: ties within the tolerance are
+                        // allowed by the contract (sup over pruned nodes <= t <= final lo + tol); on
+                        // planar ground (after the detrend) every patch ties with the best
+                        if lo != lo_c {
+                            lo_c = lo;
+                            let t = if self.tie { down(lo + 0.49 * self.tol(lo)) } else { lo };
+                            // lam' with L^2 lam' <= t (fl(L^2) has rel. error <= 2U)
+                            lp = if t >= 0.0 { down(t / (self.l2 * (1.0 + 4.0 * U))) } else { down(t / (self.l2 * (1.0 - 4.0 * U))) };
+                            mg = up(self.margin(lp, zm) + e_beta);
+                            rhs = down(zt - lp * at - bt - ERR * (zt.abs() + (lp * at).abs() + bt.abs()) - lp.abs() * self.e_a - e_bt);
+                        }
+                        let bound = up(hull_max(&hpts[hr[nd].0..hr[nd].1], lp) + dd[nd] + mg);
                         if bound < rhs {
                             if self.check {
                                 self.check_pruned(r, c, &ents, nd, nlo, nhi.min(jj), p2, lo);
@@ -643,8 +700,8 @@ impl<'a> H<'a> {
 
     /// Margin for a hull query at slope lp (rigour note sec. 3).
     #[inline]
-    fn margin(&self, lp: f64) -> f64 {
-        64.0 * U * (self.zmax + lp.abs() * self.amax) + lp.abs() * self.e_a
+    fn margin(&self, lp: f64, zm: f64) -> f64 {
+        64.0 * U * (zm + lp.abs() * self.amax) + lp.abs() * self.e_a
     }
 
     /// VIEWSHED_HORIZON_CHECK: every patch under a pruned node has a certified lower bound <= lo
@@ -654,7 +711,7 @@ impl<'a> H<'a> {
         let _ = (nd, p2);
         for e in &ents[nlo..nhi] {
             let (vl, _) = self.patch_iv(r, c, e.r0 as i64, e.c0 as i64);
-            assert!(vl <= lo + self.tol(lo), "VIEWSHED_HORIZON_CHECK: pruned patch ({}, {}) reaches {vl} > {lo} for ({r}, {c})", e.r0, e.c0);
+            assert!(vl <= lo + 0.5 * self.tol(lo), "VIEWSHED_HORIZON_CHECK: pruned patch ({}, {}) reaches {vl} > {lo} for ({r}, {c})", e.r0, e.c0);
         }
     }
 
