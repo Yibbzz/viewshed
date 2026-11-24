@@ -121,7 +121,7 @@ pub fn shadow_vec(grid: &Grid, v: [f64; 3], opts: &ShadowOptions) -> Result<Vec<
     if !(dx.is_finite() && dy.is_finite() && dz.is_finite()) || (dx == 0.0 && dy == 0.0) || dz < 0.0 {
         return Err(Error::InvalidArgument("the sun direction needs a horizontal part and dz >= 0"));
     }
-    if !(opts.target_height >= 0.0) {
+    if opts.target_height.is_nan() || opts.target_height < 0.0 {
         return Err(Error::InvalidArgument("target_height must be >= 0"));
     }
     let k = opts.drop_factor();
