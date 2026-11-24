@@ -110,3 +110,14 @@ def test_positions_core_zenith_night_weights():
     got = run(z, GT, ["positions", *[num(v) for p in pos for v in p]])
     want = sh.sun_hours_at(z, GT, [p for p in pos if p[1] > 0])
     assert np.array_equal(got, want, equal_nan=True)
+
+
+def test_samples_partial_step_and_errors_match():
+    d = 1718928000.0
+    for args in ((89.9, 0.0, d + 21600, d + 64800, 1500.0, 0.0), (47.0, 8.0, d, d + 86400 - 7, 3600.0, 1.2), (-60.0, 20.0, d, d + 100.0, 3600.0, 0.0)):
+        rs = rust_samples(*args)
+        py = sh.samples(*args)
+        assert len(rs) == len(py) and all(abs(a[0] - b[0]) < 1e-9 and abs(a[1] - b[1]) < 1e-9 and a[2] == b[2] for a, b in zip(rs, py)), args
+    for bad in ((91.0, 0.0, d, d + 10, 1.0, 0.0), (0.0, 0.0, d + 10, d, 1.0, 0.0), (0.0, 0.0, d, d + 10, 0.0, 0.0)):
+        p = subprocess.run([str(_bin()), "samples", *map(num, bad)], capture_output=True, text=True)
+        assert p.returncode != 0

@@ -24,8 +24,10 @@ def _refraction_deg(e):
 
 def sun_position(lat, lon, unix_seconds):
     """(azimuth, apparent elevation, true elevation) in degrees; lat/lon in degrees (east +)."""
-    if not (-90.0 <= lat <= 90.0) or not math.isfinite(lon) or not math.isfinite(unix_seconds):
-        raise ValueError("latitude must be in [-90, 90] and longitude, time finite")
+    if not (-90.0 <= lat <= 90.0) or not math.isfinite(lon):
+        raise ValueError("latitude must be in [-90, 90] degrees and longitude finite")
+    if not math.isfinite(unix_seconds):
+        raise ValueError("time must be finite")
     jd = unix_seconds / 86400.0 + 2440587.5
     t = (jd - 2451545.0) / 36525.0
     l0 = math.fmod(280.46646 + t * (36000.76983 + t * 0.0003032), 360.0)

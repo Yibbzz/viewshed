@@ -41,8 +41,11 @@ fn refraction_deg(e: f64) -> f64 {
 /// 1970-01-01 (fractional allowed). The same float operations as the conformance oracle
 /// (conformance/sunpos.py).
 pub fn sun_position(lat_deg: f64, lon_deg: f64, unix_seconds: f64) -> Result<SunPosition, Error> {
-    if !(-90.0..=90.0).contains(&lat_deg) || !lon_deg.is_finite() || !unix_seconds.is_finite() {
-        return Err(Error::InvalidSunHours);
+    if !(-90.0..=90.0).contains(&lat_deg) || !lon_deg.is_finite() {
+        return Err(Error::InvalidLocation);
+    }
+    if !unix_seconds.is_finite() {
+        return Err(Error::InvalidTime);
     }
     let jd = unix_seconds / 86400.0 + 2440587.5;
     let t = (jd - 2451545.0) / 36525.0;
@@ -85,8 +88,11 @@ pub fn sun_position(lat_deg: f64, lon_deg: f64, unix_seconds: f64) -> Result<Sun
 /// raster's grid north. Elevation <= 0: the sun is down (adds nothing); elevation >= 90: every
 /// cell with data is lit. No-data cells: NaN.
 pub fn sun_hours(grid: &Grid, positions: &[(Sun, f64)], opts: &ShadowOptions) -> Result<Vec<f64>, Error> {
-    if positions.iter().any(|(s, w)| !(w.is_finite() && *w >= 0.0) || !s.azimuth_deg.is_finite() || s.elevation_deg.is_nan()) {
-        return Err(Error::InvalidSunHours);
+    if positions.iter().any(|(_, w)| !(w.is_finite() && *w >= 0.0)) {
+        return Err(Error::InvalidWeight);
+    }
+    if positions.iter().any(|(s, _)| !s.azimuth_deg.is_finite() || s.elevation_deg.is_nan()) {
+        return Err(Error::InvalidSun);
     }
     let n = grid.rows * grid.cols;
     let mut hours = vec![0.0f64; n];
@@ -117,19 +123,30 @@ pub fn sun_hours(grid: &Grid, positions: &[(Sun, f64)], opts: &ShadowOptions) ->
     Ok(hours)
 }
 
-/// Grid-relative sun positions at midpoint samples start + (i + 1/2) step (i < floor((end - start) /
-/// step)), each weighted step / 3600 hours; samples with the sun down are dropped. Grid azimuth =
-/// true azimuth - `grid_convergence_deg` (the meridian convergence of the raster's projection).
+/// Grid-relative sun positions at midpoint samples start + (i + 1/2) step (i < n = floor((end -
+/// start) / step)), each weighted step / 3600 hours, plus, if the range isn't a whole number of steps,
+/// one sample at the midpoint of the remainder weighted remainder / 3600. Samples with the sun down
+/// are dropped. Grid azimuth = true azimuth - `grid_convergence_deg` (the meridian convergence of
+/// the raster's projection).
 pub fn sun_samples(lat_deg: f64, lon_deg: f64, start_unix: f64, end_unix: f64, step_s: f64, grid_convergence_deg: f64) -> Result<Vec<(Sun, f64)>, Error> {
-    if !(step_s > 0.0 && step_s.is_finite() && end_unix >= start_unix && grid_convergence_deg.is_finite()) {
-        return Err(Error::InvalidSunHours);
+    if !(-90.0..=90.0).contains(&lat_deg) || !lon_deg.is_finite() || !grid_convergence_deg.is_finite() {
+        return Err(Error::InvalidLocation);
+    }
+    if !(step_s > 0.0 && step_s.is_finite() && start_unix.is_finite() && end_unix.is_finite() && end_unix >= start_unix) {
+        return Err(Error::InvalidTime);
     }
     let n = ((end_unix - start_unix) / step_s).floor() as u64;
+    let mut times: Vec<(f64, f64)> = (0..n).map(|i| (start_unix + (i as f64 + 0.5) * step_s, step_s)).collect();
+    let done = start_unix + n as f64 * step_s;
+    let rem = end_unix - done;
+    if rem > 0.0 {
+        times.push((done + 0.5 * rem, rem));
+    }
     let mut out = Vec::new();
-    for i in 0..n {
-        let p = sun_position(lat_deg, lon_deg, start_unix + (i as f64 + 0.5) * step_s)?;
+    for (t, w) in times {
+        let p = sun_position(lat_deg, lon_deg, t)?;
         if p.elevation_deg > 0.0 {
-            out.push((Sun { azimuth_deg: (p.azimuth_deg - grid_convergence_deg + 720.0) % 360.0, elevation_deg: p.elevation_deg }, step_s / 3600.0));
+            out.push((Sun { azimuth_deg: (p.azimuth_deg - grid_convergence_deg + 720.0) % 360.0, elevation_deg: p.elevation_deg }, w / 3600.0));
         }
     }
     Ok(out)

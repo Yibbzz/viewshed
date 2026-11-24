@@ -54,3 +54,15 @@ def test_midpoint_samples_and_night():
     assert sh.samples(LAT, LON, DAY + 12 * 3600 - 900, DAY + 12 * 3600, 300.0) == []   # local midnight
     az0 = sun_position(LAT, LON, DAY + 450.0)[0]
     assert math.isclose(sh.samples(LAT, LON, DAY, DAY + 900, 900.0, grid_convergence=1.5)[0][0], az0 - 1.5)
+
+
+def test_partial_last_step_is_kept():
+    # 06:00-18:00 UTC at 25 min: 28 whole steps (11 h 40 min) + a 20 min remainder; at 89.9 N in
+    # June the sun never sets, so the weights add up to the whole range
+    d = 1718928000.0            # 2024-06-21 00:00 UTC
+    s = sh.samples(89.9, 0.0, d + 6 * 3600, d + 18 * 3600, 1500.0)
+    assert len(s) == 29
+    assert math.isclose(sum(w for *_, w in s), 12.0)
+    assert math.isclose(s[-1][2], 20 / 60)
+    t_last = d + 6 * 3600 + 28 * 1500 + 600
+    assert s[-1][:2] == (math.fmod(sun_position(89.9, 0.0, t_last)[0] + 720.0, 360.0), sun_position(89.9, 0.0, t_last)[1])

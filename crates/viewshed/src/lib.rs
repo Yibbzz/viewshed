@@ -66,9 +66,12 @@ pub enum Error {
     /// Refraction above 1 with curvature on (the earth would bulge upwards): not supported
     /// for shadows.
     UnsupportedRefraction,
-    /// Sun hours: a latitude outside [-90, 90], a non-finite longitude or time, a step that isn't
-    /// positive, an end before the start, or a weight that isn't a finite number >= 0.
-    InvalidSunHours,
+    /// A latitude outside [-90, 90], or a non-finite longitude or grid convergence.
+    InvalidLocation,
+    /// A non-finite time, an end before the start, or a time step that isn't a positive number.
+    InvalidTime,
+    /// A sun-hours weight that isn't a finite number >= 0.
+    InvalidWeight,
 }
 
 impl fmt::Display for Error {
@@ -83,7 +86,9 @@ impl fmt::Display for Error {
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
             Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
             Error::InvalidSun => write!(f, "the sun's elevation must be in (0, 90) degrees and its azimuth finite"),
-            Error::InvalidSunHours => write!(f, "sun hours need a latitude in [-90, 90], finite longitude and times, step > 0, end >= start and weights >= 0"),
+            Error::InvalidLocation => write!(f, "latitude must be in [-90, 90] degrees and longitude and grid convergence finite"),
+            Error::InvalidTime => write!(f, "times must be finite, the end not before the start, and the time step positive"),
+            Error::InvalidWeight => write!(f, "weights must be finite and >= 0"),
             Error::InvalidTargetHeight => write!(f, "target_height must be >= 0"),
             Error::UnsupportedRefraction => write!(f, "refraction above 1 (an earth bulging upwards) is not supported for shadows"),
         }
