@@ -31,9 +31,13 @@
 use std::fmt;
 
 mod bilinear;
+mod shadow;
 mod sweep;
 mod ztv;
 
+pub use shadow::{shadow, ShadowOptions, Sun};
+#[doc(hidden)]
+pub use shadow::shadow_vec;
 pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 
 /// Something went wrong before any visibility was computed.
@@ -51,6 +55,8 @@ pub enum Error {
     ObserverOnNoData,
     /// The area searched is over 1,000,000 cells across (set `max_distance`).
     TooLarge,
+    /// An argument outside its domain (e.g. a sun elevation outside (0, 90) degrees).
+    InvalidArgument(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -64,6 +70,7 @@ impl fmt::Display for Error {
             Error::ObserverOutside => write!(f, "the observer is outside the raster"),
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
             Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
+            Error::InvalidArgument(m) => write!(f, "{m}"),
         }
     }
 }

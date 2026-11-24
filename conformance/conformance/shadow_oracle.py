@@ -30,11 +30,19 @@ def sun_vector(transform, azimuth, elevation):
     of one cell). Azimuth clockwise from north, elevation above the horizontal, degrees."""
     if not (0.0 < elevation < 90.0):
         raise ValueError("elevation must be in (0, 90) degrees")
-    az, el = math.radians(azimuth), math.radians(elevation)
+    # cardinal azimuths exactly (sin(pi) is 1.2e-16 in floats: a ray a hair off the grid line);
+    # the crate's Sun::direction uses the same rule, so both are exact for the same vector
+    a = math.fmod(float(azimuth), 360.0)
+    if a < 0:
+        a += 360.0
+    if a in (0.0, 90.0, 180.0, 270.0):
+        sa, ca = {0.0: (0.0, 1.0), 90.0: (1.0, 0.0), 180.0: (0.0, -1.0), 270.0: (-1.0, 0.0)}[a]
+    else:
+        sa, ca = math.sin(math.radians(a)), math.cos(math.radians(a))
     res = abs(transform[1])
-    dx = math.sin(az) * (res / transform[1])
-    dy = math.cos(az) * (res / transform[5])
-    return dx, dy, math.tan(el) * res
+    dx = sa * (res / transform[1])
+    dy = ca * (res / transform[5])
+    return dx, dy, math.tan(math.radians(elevation)) * res
 
 
 def _corners(z, r0, c0):
