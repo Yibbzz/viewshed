@@ -778,7 +778,7 @@ fn walk(
     mid: &[(f64, f64)],
     count: &mut usize,
 ) -> (State, i64, i64) {
-    walk_impl(cell, grid, pyr, r, c, failed, mid, count, true)
+    walk_impl(cell, grid, pyr, r, c, failed, mid, count, true, None)
 }
 
 /// walk with the pyramid's skipping optional: off for a sightline certified clear but
@@ -795,6 +795,7 @@ fn walk_impl(
     mid: &[(f64, f64)],
     count: &mut usize,
     pyramid: bool,
+    mut und: Option<&mut Vec<(i64, i64)>>,
 ) -> (State, i64, i64) {
     let (ue, ve, du, dv, delta) = (cell.ue, cell.ve, cell.du, cell.dv, cell.delta);
     let (uk, us, un) = axis(ue, du);
@@ -960,12 +961,21 @@ fn walk_impl(
             // this stretch is no higher than the 3 x 3 patch max around it
             if !clear_level0(cell, pyr, ta, tb) {
                 state = State::Undecided;
+                if let Some(u) = und.as_deref_mut() {
+                    let m = (ta + tb) / 2.0;
+                    u.push(((cell.ve + m * cell.dv).floor() as i64, (cell.ue + m * cell.du).floor() as i64));
+                }
             }
         } else {
             let (st, r0, c0) = segment(cell, grid, ta, tb, last);
             match st {
                 State::Blocking => return (State::Blocking, r0, c0),
-                State::Undecided if !clear_level0(cell, pyr, ta, tb) => state = State::Undecided,
+                State::Undecided if !clear_level0(cell, pyr, ta, tb) => {
+                    state = State::Undecided;
+                    if let Some(u) = und.as_deref_mut() {
+                        u.push((r0, c0));
+                    }
+                }
                 _ => {}
             }
         }
@@ -1122,6 +1132,35 @@ fn blocked_exact(grid: &Grid, s: &Setup, pyr: &Pyramid, cell: &Cell, r: i64, c: 
     patches.sort_unstable();
     patches.dedup();
     patches.retain(|&(r0, c0)| !patch_clear(cell, grid, r0, c0));
+    let e = exact_setup(s, grid.at(r as usize, c as usize), r, c);
+    for (r0, c0) in patches {
+        if let Some((ta, tb)) = exact_patch_segment(&e, r0, c0) {
+            if let Some(m) = exact_segment_min(grid, &e, &ta, &tb) {
+                if m.is_negative() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// blocked_exact for a walk's undecided segments, given as the patches they lie in (the
+/// walk certified every other segment clear, or skipped it with a certificate): the
+/// same 3 x 3 neighbourhoods, without re-walking the whole sightline in floats.
+fn blocked_exact_at(grid: &Grid, s: &Setup, cell_patches: &[(i64, i64)], r: i64, c: i64) -> bool {
+    let mut patches: Vec<(i64, i64)> = Vec::with_capacity(9 * cell_patches.len());
+    for &(r0, c0) in cell_patches {
+        for a in -1..=1 {
+            for b in -1..=1 {
+                patches.push((r0 + a, c0 + b));
+            }
+        }
+    }
+    patches.sort_unstable();
+    patches.dedup();
+    let cell = make_cell(s, grid.at(r as usize, c as usize), r, c);
+    patches.retain(|&(r0, c0)| !patch_clear(&cell, grid, r0, c0));
     let e = exact_setup(s, grid.at(r as usize, c as usize), r, c);
     for (r0, c0) in patches {
         if let Some((ta, tb)) = exact_patch_segment(&e, r0, c0) {
@@ -2761,7 +2800,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
     let near_tab = &near_tab;
     let isr = &is_target;
     // per sector: decided cells, undecided cells (settled after), CPU seconds
-    type SectorOut = (Vec<(usize, bool)>, Vec<usize>, f64);
+    type SectorOut = (Vec<(usize, bool)>, Vec<(usize, Vec<(i64, i64)>)>, f64);
     let results: Vec<SectorOut> = (0..nsec)
         .into_par_iter()
         .map(|k| {
@@ -2778,6 +2817,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
             let mut failed = vec![-1i64; nlev];
             let mut out = Vec::new();
             let mut undecided = Vec::new();
+            let mut und_p: Vec<(i64, i64)> = Vec::new();
             let mut covered = if check { vec![false; (rows + 1) * (cols + 1)] } else { Vec::new() };
             let mut max_far = f64::NEG_INFINITY;
             for ring in 0..n_rings {
@@ -2882,7 +2922,8 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                         }
                     }
                     let pyramid = !tail_only;
-                    let (st, r0, c0) = walk_impl(&cell, grid, pyr, r, c, &mut failed, &mid, &mut 0, pyramid);
+                    und_p.clear();
+                    let (st, r0, c0) = walk_impl(&cell, grid, pyr, r, c, &mut failed, &mid, &mut 0, pyramid, Some(&mut und_p));
                     let visible = match st {
                         State::Blocking => {
                             blocker = Some((r0, c0));
@@ -2892,7 +2933,7 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
                         // cluster in a few sectors (sightlines along the observer's row or
                         // column over flat ground), and one thread would carry them all
                         State::Undecided => {
-                            undecided.push(i);
+                            undecided.push((i, std::mem::take(&mut und_p)));
                             continue;
                         }
                         _ => true,
@@ -2920,10 +2961,9 @@ fn sector_phase(grid: &Grid, s: &Setup, pyr: &Pyramid, cells: &[(i64, i64)], see
     let exact: Vec<(usize, bool)> = undecided
         .par_iter()
         .with_max_len(1)
-        .map(|&i| {
+        .map(|(i, ps)| {
             let (r, c) = ((i / cols) as i64, (i % cols) as i64);
-            let cell = make_cell(s, grid.at(r as usize, c as usize), r, c);
-            (i, !blocked_exact(grid, s, pyr, &cell, r, c))
+            (*i, !blocked_exact_at(grid, s, ps, r, c))
         })
         .collect();
     for (i, vis) in exact {
