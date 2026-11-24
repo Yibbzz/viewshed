@@ -333,41 +333,120 @@ impl<'a> Setup<'a> {
         Dec::Tie
     }
 
-    /// The crossed patches of T's ray over s in (0, smax] (a superset: each step's 3 x 3
-    /// neighbourhood, so grazing patches are never missed): Above / Clear / Tie.
+    /// The patches T's ray crosses over s in (0, smax], by an exact-order DDA: the cells the open
+    /// ray passes through, in order of the crossing parameters (float errors ~1e-15 over the few
+    /// steps of the local stretch). Where the two crossings are within 1e-9 of each other the ray
+    /// passes (near) a vertex and the order is uncertain: both side cells are evaluated. A ray on a
+    /// grid line (dx or dy exactly 0) also evaluates the cells across that line (positive-length
+    /// stretches along their shared edge). T itself is a vertex on the grid lines through it, so a
+    /// ray merely near one leaves into one side only. VIEWSHED_SHADOW_CHECK asserts the superset.
     fn walk(&self, r: i64, c: i64, smax: f64) -> Dec {
         let (rows, cols) = (self.grid.rows as i64, self.grid.cols as i64);
-        let l = self.l2.sqrt();
-        let (ux, uy) = (self.dx / l, self.dy / l);
-        let (mut tie, mut t) = (false, 0.0f64);
-        let (mut last_r, mut last_c) = (i64::MIN, i64::MIN);
-        let tmax = (smax * l).min((rows + cols) as f64 * 2.0 + 4.0) + 1.5;
-        while t <= tmax {
-            let (cx, cy) = ((c as f64 + t * ux).floor() as i64, (r as f64 + t * uy).floor() as i64);
-            t += 0.25;
-            if cx < -2 || cy < -2 || cx > cols + 1 || cy > rows + 1 {
-                break;
+        let (dx, dy) = (self.dx, self.dy);
+        let mut tie = false;
+        let mut seen: Vec<(i64, i64)> = Vec::new();
+        let eval = |r0: i64, c0: i64, tie: &mut bool, seen: &mut Vec<(i64, i64)>| -> bool {
+            if r0 < -1 || c0 < -1 || r0 >= rows || c0 >= cols {
+                return false;
             }
-            if (cx, cy) == (last_c, last_r) {
-                continue;
+            if self.check {
+                seen.push((r0, c0));
             }
-            last_r = cy;
-            last_c = cx;
-            for dr in -1..=1 {
-                for dc in -1..=1 {
-                    let (r0, c0) = (cy + dr, cx + dc);
-                    if r0 < -1 || c0 < -1 || r0 >= rows || c0 >= cols {
+            match self.patch_on_ray(r, c, r0, c0, smax) {
+                Dec::Above => true,
+                Dec::Tie => {
+                    *tie = true;
+                    false
+                }
+                Dec::Clear => false,
+            }
+        };
+        let (sx, sy) = (if dx > 0.0 { 1 } else { -1 }, if dy > 0.0 { 1 } else { -1 });
+        let mut cx = if dx > 0.0 { c } else { c - 1 };
+        let mut cy = if dy > 0.0 { r } else { r - 1 };
+        // crossing parameters of the next vertical (x) and horizontal (y) grid lines
+        let tdx = if dx != 0.0 { (1.0 / dx).abs() } else { f64::INFINITY };
+        let tdy = if dy != 0.0 { (1.0 / dy).abs() } else { f64::INFINITY };
+        let mut tx = if dx != 0.0 { tdx } else { f64::INFINITY };
+        let mut ty = if dy != 0.0 { tdy } else { f64::INFINITY };
+        let mut t = 0.0f64;
+        while t < smax && cx >= -1 && cy >= -1 && cx < cols && cy < rows {
+            if eval(cy, cx, &mut tie, &mut seen) {
+                return Dec::Above;
+            }
+            // a ray on a grid line: the cell across it shares a positive-length edge stretch
+            if dx == 0.0 && eval(cy, cx + 1, &mut tie, &mut seen) {
+                return Dec::Above;
+            }
+            if dy == 0.0 && eval(cy + 1, cx, &mut tie, &mut seen) {
+                return Dec::Above;
+            }
+            let near = (tx - ty).abs() <= 1e-9 * tx.min(ty).max(1.0);
+            if near && tx.min(ty) < smax {
+                // through (near) a vertex: either side cell may carry a stretch
+                if eval(cy, cx + sx, &mut tie, &mut seen) || eval(cy + sy, cx, &mut tie, &mut seen) {
+                    return Dec::Above;
+                }
+                t = tx.max(ty);
+                cx += sx;
+                cy += sy;
+                tx += tdx;
+                ty += tdy;
+            } else if tx < ty {
+                t = tx;
+                cx += sx;
+                tx += tdx;
+            } else {
+                t = ty;
+                cy += sy;
+                ty += tdy;
+            }
+        }
+        if self.check {
+            self.check_walk(r, c, smax, &seen);
+        }
+        if tie { Dec::Tie } else { Dec::Clear }
+    }
+
+    /// VIEWSHED_SHADOW_CHECK: every patch whose stretch of T's ray has positive length and starts
+    /// before smax, by the exact interval test (rational, as hidden_exact), over all patches within
+    /// smax + 2 cells, was evaluated by the walk.
+    fn check_walk(&self, r: i64, c: i64, smax: f64, seen: &[(i64, i64)]) {
+        let (rows, cols) = (self.grid.rows as i64, self.grid.cols as i64);
+        let q = |v: f64| BigRational::from_float(v).expect("finite");
+        let int = |v: i64| BigRational::from_integer(BigInt::from(v));
+        let (dx, dy, sm) = (q(self.dx), q(self.dy), q(smax));
+        let reach = (smax * self.l2.sqrt()).ceil() as i64 + 2;
+        for r0 in (r - reach).max(-1)..=(r + reach).min(rows - 1) {
+            for c0 in (c - reach).max(-1)..=(c + reach).min(cols - 1) {
+                if self.corners(r0, c0).iter().any(|v| v.is_nan()) {
+                    continue;
+                }
+                let mut lo = BigRational::zero();
+                let mut hi: Option<BigRational> = None;
+                let mut meets = true;
+                for (p0, d, k0) in [(int(c), &dx, int(c0)), (int(r), &dy, int(r0))] {
+                    if d.is_zero() {
+                        meets &= k0 <= p0 && p0 <= &k0 + int(1);
                         continue;
                     }
-                    match self.patch_on_ray(r, c, r0, c0, smax) {
-                        Dec::Above => return Dec::Above,
-                        Dec::Tie => tie = true,
-                        Dec::Clear => {}
+                    let x = (&k0 - &p0) / d;
+                    let y = (&k0 + int(1) - &p0) / d;
+                    let (a_, b_) = if x <= y { (x, y) } else { (y, x) };
+                    if a_ > lo {
+                        lo = a_;
                     }
+                    hi = Some(match hi {
+                        Some(h) if h < b_ => h,
+                        _ => b_,
+                    });
+                }
+                let Some(hi) = hi else { continue };
+                if meets && hi > lo && lo < sm {
+                    assert!(seen.contains(&(r0, c0)), "VIEWSHED_SHADOW_CHECK: patch ({r0}, {c0}) crossed by ({r}, {c})'s ray at s {}..{} (< {smax}) not walked", lo.to_f64().unwrap_or(f64::NAN), hi.to_f64().unwrap_or(f64::NAN));
                 }
             }
         }
-        if tie { Dec::Tie } else { Dec::Clear }
     }
 
     fn run(&self) -> Vec<bool> {
