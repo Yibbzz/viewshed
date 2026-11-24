@@ -73,13 +73,17 @@ def rasters():
         yield f"rand{k}", z, (500000.37, res, 0.0, 4000000.61, 0.0, -res)
 
 
-@pytest.mark.parametrize("fallback", [False, True], ids=["main", "fallback"])
+PATHS = {"main": None, "fallback": {"VIEWSHED_HORIZON_FALLBACK_ALL": "1"},
+         "exact": {"VIEWSHED_HORIZON_FALLBACK_ALL": "1", "VIEWSHED_HORIZON_EXACT_ALL": "1"}}
+
+
+@pytest.mark.parametrize("fallback", list(PATHS))
 @pytest.mark.parametrize("name,z,gt", list(rasters()), ids=lambda v: v if isinstance(v, str) else "")
 def test_rise_within_tolerance_of_exact(name, z, gt, fallback):
     res = abs(gt[1])
     for i, (dx, dy) in enumerate(VECS):
         th, curv = (0.0, False) if i % 2 == 0 else (0.5, True)
-        got = run(_bin(), z, gt, th, curv, ["vec", num(dx), num(dy)], env={"VIEWSHED_HORIZON_FALLBACK_ALL": "1"} if fallback else None)
+        got = run(_bin(), z, gt, th, curv, ["vec", num(dx), num(dy)], env=PATHS[fallback])
         ex, want = ho.horizon_map(z, gt, (dx, dy), th, curv, earth_radius=50.0 * res * max(z.shape))
         ok = ~np.isnan(z)
         assert np.array_equal(np.isnan(got), ~ok), name
@@ -115,20 +119,29 @@ def test_consistent_with_shadows(name, z, gt):
             assert np.array_equal(lit[ok], ~(h[ok] > dz)), (name, (dx, dy, dz))
 
 
-@pytest.mark.parametrize("fallback", [False, True], ids=["main", "fallback"])
+@pytest.mark.parametrize("fallback", list(PATHS))
 def test_far_horizon(fallback):
     # a 200 m ridge 2500 cells away on flat ground with small non-dyadic noise, an inexact shallow
     # direction (arbitrary near-vertex crossings): the horizon is set ~2500 cells out, where the
     # global closed form would cancel badly (review 2026-11-24); checked against the exact oracle
     rng = np.random.default_rng(21)
-    z = np.round(rng.uniform(-0.3, 0.3, (7, 2601)), 3) + 0.1
-    z[:, 2500] = 200.0
+    # the forced rational branch is costly per cell: a shorter raster there (ridge 650 cells out)
+    cols, ridge = (701, 650) if fallback == "exact" else (2601, 2500)
+    z = np.round(rng.uniform(-0.3, 0.3, (7, cols)), 3) + 0.1
+    z[:, ridge] = 200.0
     gt = (0.0, 1.0, 0.0, 7.0, 0.0, -1.0)
     dx, dy = 0.9999980000019999, 0.002
-    got = run(_bin(), z, gt, 0.0, False, ["vec", num(dx), num(dy)], env={"VIEWSHED_HORIZON_FALLBACK_ALL": "1"} if fallback else None)
+    got = run(_bin(), z, gt, 0.0, False, ["vec", num(dx), num(dy)], env=PATHS[fallback])
     for c in (0, 3, 7, 11, 40):
         r = 1
         w = ho.horizon_exact(z, r, c, dx, dy, 0.0, 1.0, 0.0)
         wf = float(w.approx())
-        assert wf > 0.07                                    # set by the ridge, ~2500 cells away
+        assert wf > 0.07                                    # set by the ridge, far away
         assert abs(got[r, c] - wf) <= 1e-9 + 1e-12 * abs(wf), (c, got[r, c], wf)
+
+
+def test_flat_is_exactly_zero():
+    z = np.full((6, 9), 12.5)
+    got = run(_bin(), z, (0.0, 1.0, 0.0, 6.0, 0.0, -1.0), 0.0, False, ["az", "63.0"])
+    # every cell with ground ahead reports exactly 0 (not a tiny negative from rounding)
+    assert ((got == 0.0) | (got == -90.0)).all() and (got == 0.0).any(), got

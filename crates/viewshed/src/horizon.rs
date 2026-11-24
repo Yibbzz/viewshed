@@ -93,6 +93,8 @@ struct H<'a> {
     check: bool,
     /// test hook (VIEWSHED_HORIZON_FALLBACK_ALL): every cell through the exact fallback
     force_fallback: bool,
+    /// test hook (VIEWSHED_HORIZON_EXACT_ALL, with the above): the fallback's rational branch for all
+    force_exact: bool,
 }
 
 /// One patch in a strip: its corners' (a, z) sorted by a, a_min (rounded down), position.
@@ -129,6 +131,7 @@ impl<'a> H<'a> {
             amax: span,
             check: std::env::var("VIEWSHED_HORIZON_CHECK").is_ok(),
             force_fallback: std::env::var("VIEWSHED_HORIZON_FALLBACK_ALL").is_ok(),
+            force_exact: std::env::var("VIEWSHED_HORIZON_EXACT_ALL").is_ok(),
         };
         h.stencil = h.dda(0, 0, h.s_loc, false);
         h
@@ -513,7 +516,9 @@ impl<'a> H<'a> {
             upper_hull(&merged, &mut hpts);
             hr[nd] = (st, hpts.len());
             if hr[nd].1 > hr[nd].0 {
-                dd[nd] = up(deficit(&merged, &hpts[st..]) + dd[2 * nd].max(dd[2 * nd + 1]));
+                // + 16 U Zmax: kept vertices are concave only up to the orientation test's rounding,
+                // so a child's envelope can exceed this node's by that much between measured points
+                dd[nd] = up(deficit(&merged, &hpts[st..]) + dd[2 * nd].max(dd[2 * nd + 1]) + 16.0 * U * self.zmax);
             }
         }
         // targets: a-cut key a_T + C0 L^2 (rounded up), descending
@@ -602,7 +607,9 @@ impl<'a> H<'a> {
             }
             prev = arg;
             let ok = !self.force_fallback && (hi <= lo + self.tol(lo) || (lo == f64::NEG_INFINITY && hi == f64::NEG_INFINITY));
-            out.push((i, lo, ok));
+            // flat ground: an enclosure containing 0 (within the tolerance) reports exactly 0
+            let v = if ok && lo < 0.0 && hi >= 0.0 { 0.0 } else { lo };
+            out.push((i, v, ok));
         }
         out
     }
@@ -664,6 +671,7 @@ impl<'a> H<'a> {
             }
         }
         let (mut lo_all, mut hi_all) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut stretches: Vec<(i64, i64, BigRational, BigRational)> = Vec::new();
         for (r0, c0) in cand {
             if self.corners(r0, c0).iter().any(|v| v.is_nan()) {
                 continue;
@@ -703,14 +711,68 @@ impl<'a> H<'a> {
             }
             lo_all = lo_all.max(vl);
             hi_all = hi_all.max(vh);
+            stretches.push((r0, c0, lo, hi));
         }
-        if hi_all > lo_all + self.tol(lo_all) && lo_all > f64::NEG_INFINITY {
-            // not expected (local errors are ~1e-10 res at most); report rather than return silently
-            if std::env::var("VIEWSHED_HORIZON_STATS").is_ok() {
-                eprintln!("horizon: fallback enclosure wider than the tolerance at ({r}, {c}): [{lo_all:e}, {hi_all:e}]");
+        if self.force_exact || hi_all > lo_all + self.tol(lo_all) || (lo_all == f64::NEG_INFINITY && hi_all > f64::NEG_INFINITY) {
+            // not expected (local errors are ~1e-10 res at most), but certified anyway: every
+            // patch's sup in rational arithmetic, bracketed between adjacent floats
+            assert!(!self.check || self.force_exact, "VIEWSHED_HORIZON_CHECK: fallback enclosure wider than the tolerance at ({r}, {c}): [{lo_all:e}, {hi_all:e}]");
+            let mut best = f64::NEG_INFINITY;
+            for (r0, c0, lo, hi) in &stretches {
+                best = best.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi));
             }
+            return best;
+        }
+        if lo_all < 0.0 && hi_all >= 0.0 {
+            return 0.0;
         }
         lo_all
+    }
+
+    /// The sup of A s + B + C / s over the exact stretch [lo, hi] (lo = 0 only for own patches), in
+    /// rationals: endpoint values (the s -> 0 limit B when lo = 0 and C = 0), and the vertex
+    /// B - 2 sqrt(A C) when A < 0, C < 0 and C / A lies in (lo^2, hi^2), with sqrt(A C) bracketed by a
+    /// float q, q^2 <= A C <= next_up(q)^2. Returns a float lower bound within ~2 ulps of the sup.
+    fn exact_patch_sup(&self, r: i64, c: i64, r0: i64, c0: i64, lo: &BigRational, hi: &BigRational) -> f64 {
+        let q = |v: f64| BigRational::from_float(v).expect("finite");
+        let int = |v: i64| BigRational::from_integer(BigInt::from(v));
+        let [z00, z01, z10, z11] = self.corners(r0, c0).map(q);
+        let (dx, dy) = (q(self.dx), q(self.dy));
+        let e3 = &z00 - &z01 - &z10 + &z11;
+        let (u0, v0) = (int(c - c0), int(r - r0));
+        let l2 = &dx * &dx + &dy * &dy;
+        let curv = q(self.curv / (self.res * self.res * self.l2)) * q(self.res) * q(self.res) * &l2;
+        let a = &e3 * &dx * &dy - &curv;
+        let b = (&z01 - &z00) * &dx + (&z10 - &z00) * &dy + &e3 * (&u0 * &dy + &v0 * &dx);
+        let cc = &z00 + (&z01 - &z00) * &u0 + (&z10 - &z00) * &v0 + &e3 * &u0 * &v0 - q(self.at(r, c)) - q(self.th);
+        let f = |s: &BigRational| &a * s + &b + &cc / s;
+        let mut vals: Vec<BigRational> = vec![f(hi)];
+        if lo.is_positive() {
+            vals.push(f(lo));
+        } else if cc.is_zero() {
+            vals.push(b.clone());
+        }
+        let mut best = f64::NEG_INFINITY;
+        for v in &vals {
+            best = best.max(bracket_lo(v));
+        }
+        if a.is_negative() && cc.is_negative() {
+            let m = &cc / &a;
+            if lo * lo < m && m < hi * hi {
+                let ac = &a * &cc;
+                let mut qf = rat_to_f64(&ac).sqrt();
+                while q(qf) * q(qf) > ac {
+                    qf = next_dn(qf);
+                }
+                while q(next_upf(qf)) * q(next_upf(qf)) < ac {
+                    qf = next_upf(qf);
+                }
+                // sqrt(AC) in [qf, next_up(qf)]: the vertex value is >= B - 2 next_up(qf)
+                let v = &b - int(2) * q(next_upf(qf));
+                best = best.max(bracket_lo(&v));
+            }
+        }
+        best
     }
 
     /// A certified lower bound on f at the exact stretch point nearest to the float s (within one
@@ -736,6 +798,27 @@ impl<'a> H<'a> {
         down(f - en / s - ERR * f.abs() - fp * ds)
     }
 
+}
+
+/// The next float above / below a finite x (f64::next_up/next_down need Rust 1.86; MSRV 1.80).
+fn next_upf(x: f64) -> f64 {
+    if x == 0.0 {
+        return f64::from_bits(1);
+    }
+    let b = x.to_bits();
+    f64::from_bits(if x > 0.0 { b + 1 } else { b - 1 })
+}
+fn next_dn(x: f64) -> f64 {
+    -next_upf(-x)
+}
+
+/// The largest float <= x.
+fn bracket_lo(x: &BigRational) -> f64 {
+    let mut f = rat_to_f64(x);
+    while f.is_finite() && BigRational::from_float(f).expect("finite") > *x {
+        f = next_dn(f);
+    }
+    f
 }
 
 fn rat_to_f64(x: &BigRational) -> f64 {
