@@ -190,7 +190,10 @@ impl<'a> Setup<'a> {
             w,
             e_l: 4.0 * ERR * span + 1e-300,
             e_a: 4.0 * ERR * span + 1e-300,
-            s_loc: C0 + (dx.abs() + dy.abs()) / l2 * (1.0 + ERR) + ERR,
+            // with a margin well above the float error of the DDA's crossing parameters (the
+            // walk stops at s_loc, and a patch beyond it must be a qualifying entry): walking a
+            // little further only decides more patches on the ray, which is always sound
+            s_loc: C0 + (dx.abs() + dy.abs()) / l2 * (1.0 + 1e-9) + 1e-9,
             check: std::env::var("VIEWSHED_SHADOW_CHECK").is_ok(),
         }
     }
