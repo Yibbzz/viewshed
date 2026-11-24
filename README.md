@@ -6,7 +6,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 
 ## Status
 
-0.2.0 on PyPI and crates.io (0.2.0 adds exact shadow maps; see [CHANGELOG.md](CHANGELOG.md)). See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every result is checked.
+0.3.0 on PyPI and crates.io (0.3.0 adds reverse viewsheds and sun hours, and shadow maps twice as fast; see [CHANGELOG.md](CHANGELOG.md)). See [BRIEF.md](BRIEF.md) for the plan and [`conformance/`](conformance/) for how every result is checked.
 
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
@@ -114,6 +114,8 @@ Times must carry a time zone (or be seconds since 1970-01-01 UTC). Each time ste
 Azimuths in the raster are measured from grid north, which differs from true north by the meridian convergence (a few degrees in UTM away from the central meridian). Pass it as `grid_convergence` (grid azimuth = true azimuth − convergence), or pass the raster's `crs` (anything pyproj accepts; needs `pip install pyproj`) and it is computed at the raster's centre, which also gives `lat` and `lon` if you leave them out. Without either, grid north is taken as true north.
 
 A day at 15-minute steps on 2,001 × 2,001 cells takes 15–23 s on 4 cores (about 0.3–0.4 s per daylight step); a year at hourly steps, about half an hour.
+
+How much exactness matters here: over a midsummer day, a fast sampled sweep (Corripio 2003) gave too few sun hours on average (0.01–0.09 h per cell), with 7.6% of cells on a 1 m lidar DEM and 2.6% on 30 m Alpine terrain off by an hour or more. That is 3–6 times the effect of realistic, spatially correlated DEM error on the same terrain; on flat 10 m farmland, DEM error matters more.
 
 ## Releasing
 

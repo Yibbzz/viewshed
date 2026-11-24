@@ -1,6 +1,6 @@
 [package]
 name = "viewshed"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Fast, exact line-of-sight viewsheds: the GRASS r.viewshed model, and exact line of sight on the bilinear surface."
