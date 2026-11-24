@@ -11,6 +11,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
+- **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
 | Package | Install | Code |
@@ -21,13 +22,15 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 ## Rust
 
 ```rust
-use viewshed::{viewshed, ztv, Grid, Options, ZtvOptions, ZtvTarget};
+use viewshed::{shadow, viewshed, ztv, Grid, Options, ShadowOptions, Sun, ZtvOptions, ZtvTarget};
 
 let z = vec![0.0; 41 * 41];
 let grid = Grid::new(&z, 41, 41, [0.0, 1.0, 0.0, 41.0, 0.0, -1.0]).unwrap();
 let seen = viewshed(&grid, 20.5, 20.5, &Options::default()).unwrap();          // Vec<bool>
 let tips = [ZtvTarget { x: 10.5, y: 30.5, height: 150.0 }];
 let counts = ztv(&grid, &tips, &ZtvOptions::default()).unwrap();                // Vec<u32>
+let sun = Sun { azimuth_deg: 135.0, elevation_deg: 30.0 };
+let lit = shadow(&grid, sun, &ShadowOptions::default()).unwrap();               // Vec<bool>
 ```
 
 ## Surface model
@@ -54,6 +57,19 @@ Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cor
 | Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
 The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
+
+## Shadow maps
+
+`shadow` marks every cell lit or in shadow for a sun at a given azimuth (degrees clockwise from north) and elevation (degrees above the horizon), exactly, on the same bilinear surface as the exact viewshed.
+
+```rust
+use viewshed::{shadow, ShadowOptions, Sun};
+let lit = shadow(&grid, Sun { azimuth_deg: 135.0, elevation_deg: 30.0 }, &ShadowOptions::default()).unwrap(); // Vec<bool>
+```
+
+A cell is in shadow when its ray towards the sun passes strictly below the surface along a stretch of positive length; rays that leave the raster are lit, and no-data cells are `False` and never cast shadow. The result is exact for the sun's direction vector as computed from the two angles in floating point (cardinal azimuths are exact): at 45°, for example, the ray rises by `tan(45°)` = 0.9999999999999999 per unit, not 1, which can move a shadow's edge by a cell on terrain built to tie. Most cells are certified lit by a running maximum along strips in the sun's direction; the rest are decided on their own ray with rigorous rounding-error bounds, and true ties in exact rational arithmetic. Earth curvature and refraction work as for viewsheds (refraction above 1 is rejected).
+
+On the same 2,001 × 2,001 windows as above (4 cores of an i5-8500T), a shadow map takes 0.63–0.72 s for suns at 135°/30°, 225°/15° and 180°/45°. On 501 × 501 windows of rough terrain with the sun 5–30° high, GRASS `r.sunmask`'s shadow map differs from the exact one on 1.6–4.9% of cells, mostly extra shadow within two cells of the shadow edge, and takes minutes where the exact map takes under 0.1 s.
 
 ## Licence
 
