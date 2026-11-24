@@ -32,12 +32,14 @@ use std::fmt;
 
 mod bilinear;
 mod shadow;
+mod sunpos;
 mod sweep;
 mod ztv;
 
 pub use shadow::{shadow, ShadowOptions, Sun};
 #[doc(hidden)]
 pub use shadow::shadow_vec;
+pub use sunpos::{sun_hours, sun_hours_between, sun_position, sun_samples, SunPosition};
 pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 
 /// Something went wrong before any visibility was computed.
@@ -64,6 +66,9 @@ pub enum Error {
     /// Refraction above 1 with curvature on (the earth would bulge upwards): not supported
     /// for shadows.
     UnsupportedRefraction,
+    /// Sun hours: a latitude outside [-90, 90], a non-finite longitude or time, a step that isn't
+    /// positive, an end before the start, or a weight that isn't a finite number >= 0.
+    InvalidSunHours,
 }
 
 impl fmt::Display for Error {
@@ -78,6 +83,7 @@ impl fmt::Display for Error {
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
             Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
             Error::InvalidSun => write!(f, "the sun's elevation must be in (0, 90) degrees and its azimuth finite"),
+            Error::InvalidSunHours => write!(f, "sun hours need a latitude in [-90, 90], finite longitude and times, step > 0, end >= start and weights >= 0"),
             Error::InvalidTargetHeight => write!(f, "target_height must be >= 0"),
             Error::UnsupportedRefraction => write!(f, "refraction above 1 (an earth bulging upwards) is not supported for shadows"),
         }
