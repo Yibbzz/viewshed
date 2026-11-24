@@ -259,6 +259,52 @@ pub fn viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>
     }
 }
 
+/// Reverse viewshed: from which cells can the target at map position (x, y) be seen?
+///
+/// `opts.target_height` is the target's height above the surface at (x, y) (a mast
+/// top, a roof); `opts.observer_height` is the eye height above every cell. Cell
+/// (r, c) is `true` when an observer standing there sees the target: the same
+/// answer as running [`viewshed`] from that cell and reading the target's cell, for
+/// every cell, but in one call.
+///
+/// - [`Surface::Bilinear`]: a sightline is a straight segment, the blocking rule is
+///   the same in both directions, and the curvature drop (`d_a * d_b` times a
+///   constant below the chord, for distances `d_a`, `d_b` to the two ends) is
+///   symmetric too, so this is one exact viewshed from the target with the two
+///   heights swapped: O(n log n). The target stays at its exact point; observers
+///   stand at cell centres.
+/// - [`Surface::RViewshed`]: that model is not symmetric (only cells nearer the
+///   observer block), so every cell is an observer looking at the target's cell
+///   centre, as [`ztv`] does with [`ZtvMethod::Forward`]: exact for the model, at
+///   most one line of sight per cell.
+///
+/// No-data cells are `false`. Errors as for [`viewshed`], with the target in the
+/// observer's place (outside the raster, or no height data under it).
+pub fn reverse_viewshed(grid: &Grid, x: f64, y: f64, opts: &Options) -> Result<Vec<bool>, Error> {
+    match opts.surface {
+        Surface::Bilinear => {
+            let swapped = Options {
+                observer_height: opts.target_height,
+                target_height: opts.observer_height,
+                ..opts.clone()
+            };
+            bilinear::viewshed(grid, x, y, &swapped)
+        }
+        Surface::RViewshed => {
+            let zo = ZtvOptions {
+                observer_height: opts.observer_height,
+                max_distance: opts.max_distance,
+                method: ZtvMethod::Forward,
+                curvature: opts.curvature,
+                refraction: opts.refraction,
+                earth_radius: opts.earth_radius,
+            };
+            let counts = ztv(grid, &[ZtvTarget { x, y, height: opts.target_height }], &zo)?;
+            Ok(counts.into_iter().map(|n| n > 0).collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +383,59 @@ mod tests {
         assert_eq!(Grid::new(&z, 41, 41, [0.0, 1.0, 0.1, 41.0, 0.0, -1.0]).unwrap_err(), Error::Rotated);
         let g = Grid::new(&z, 41, 41, GT).unwrap();
         assert_eq!(viewshed(&g, 100.0, 0.0, &Options::default()).unwrap_err(), Error::ObserverOutside);
+    }
+
+    #[test]
+    fn reverse_viewshed_equals_a_viewshed_from_every_cell() {
+        // rough terrain with no-data holes; a small earth so curvature matters
+        let n = 25;
+        let gt = [0.0, 10.0, 0.0, 250.0, 0.0, -10.0];
+        let mut z: Vec<f64> = (0..n * n)
+            .map(|i| {
+                let (r, c) = ((i / n) as f64, (i % n) as f64);
+                20.0 * (r * 0.7).sin() * (c * 0.45).cos() + 7.0 * ((r * c) * 0.13).sin()
+            })
+            .collect();
+        for &(r, c) in &[(3, 4), (17, 9), (20, 20), (8, 18)] {
+            z[r * n + c] = f64::NAN;
+        }
+        let g = Grid::new(&z, n, n, gt).unwrap();
+        let (tr, tc) = (12, 6);
+        let (tx, ty) = (tc as f64 * 10.0 + 5.0, 250.0 - tr as f64 * 10.0 - 5.0);
+        for surface in [Surface::Bilinear, Surface::RViewshed] {
+            for (curvature, max_distance) in [(false, None), (true, Some(170.0))] {
+                let opts = Options {
+                    observer_height: 1.6,
+                    target_height: 12.0,
+                    surface,
+                    curvature,
+                    earth_radius: 20_000.0,
+                    max_distance,
+                    ..Options::default()
+                };
+                let rev = reverse_viewshed(&g, tx, ty, &opts).unwrap();
+                let fwd_opts = Options { observer_height: 1.6, target_height: 12.0, ..opts.clone() };
+                let (mut seen, mut checked) = (0, 0);
+                for r in 0..n {
+                    for c in 0..n {
+                        let (x, y) = (c as f64 * 10.0 + 5.0, 250.0 - r as f64 * 10.0 - 5.0);
+                        let want = match viewshed(&g, x, y, &fwd_opts) {
+                            Ok(v) => v[tr * n + tc],
+                            Err(Error::ObserverOnNoData) => {
+                                // no-data cell, or (bilinear) a cell centre whose lower-right
+                                // patch has no surface: no forward answer to compare with
+                                assert!(!rev[r * n + c] || surface == Surface::Bilinear);
+                                continue;
+                            }
+                            Err(e) => panic!("{e}"),
+                        };
+                        assert_eq!(rev[r * n + c], want, "{surface:?} curvature {curvature} cell ({r}, {c})");
+                        checked += 1;
+                        seen += want as usize;
+                    }
+                }
+                assert!(checked > 500 && seen > 50 && seen < checked, "{surface:?}: {seen} of {checked}");
+            }
+        }
     }
 }

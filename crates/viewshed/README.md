@@ -11,6 +11,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
+- **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
@@ -22,13 +23,15 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 ## Rust
 
 ```rust
-use viewshed::{shadow, viewshed, ztv, Grid, Options, ShadowOptions, Sun, ZtvOptions, ZtvTarget};
+use viewshed::{reverse_viewshed, shadow, viewshed, ztv, Grid, Options, ShadowOptions, Sun, ZtvOptions, ZtvTarget};
 
 let z = vec![0.0; 41 * 41];
 let grid = Grid::new(&z, 41, 41, [0.0, 1.0, 0.0, 41.0, 0.0, -1.0]).unwrap();
 let seen = viewshed(&grid, 20.5, 20.5, &Options::default()).unwrap();          // Vec<bool>
 let tips = [ZtvTarget { x: 10.5, y: 30.5, height: 150.0 }];
 let counts = ztv(&grid, &tips, &ZtvOptions::default()).unwrap();                // Vec<u32>
+let mast = Options { target_height: 30.0, ..Options::default() };
+let seen_from = reverse_viewshed(&grid, 20.5, 35.5, &mast).unwrap();          // Vec<bool>
 let sun = Sun { azimuth_deg: 135.0, elevation_deg: 30.0 };
 let lit = shadow(&grid, sun, &ShadowOptions::default()).unwrap();               // Vec<bool>
 ```
@@ -57,6 +60,18 @@ Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cor
 | Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
 The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
+
+## Reverse viewshed
+
+`reverse_viewshed` turns the question round: from which cells can a target at (x, y), `opts.target_height` above the ground, be seen by an observer `opts.observer_height` above each cell?
+
+```rust
+use viewshed::{reverse_viewshed, Options, Surface};
+let opts = Options { target_height: 30.0, observer_height: 1.6, surface: Surface::Bilinear, ..Options::default() };
+let seen_from = reverse_viewshed(&grid, x, y, &opts).unwrap();                  // Vec<bool>
+```
+
+A cell is `true` when a viewshed from that cell would show the target, for every cell. On the bilinear surface that costs one exact viewshed: the sightline is the same segment both ways, the blocking rule (strictly below the surface along a stretch of positive length) doesn't depend on direction, and the curvature drop below the chord at a point is the same seen from either end, so it is the viewshed from the target with the two heights swapped (checked against the exact oracle run forwards from every cell). The target stays at its exact point; observers stand at cell centres. The `Surface::RViewshed` model isn't symmetric (only cells nearer the observer block), so there every cell looks at the target's cell centre in turn, as `ztv` does with `ZtvMethod::Forward`: exact for the model but slower (2,001 × 2,001, 4 cores: 6.7 s, against 2.3 s for the bilinear reverse viewshed and 1.4 s for an ordinary r.viewshed-model viewshed). Taking the viewshed from the target instead differed on 0.2–1.1% of cells in our tests (41 × 41 rough rasters).
 
 ## Shadow maps
 

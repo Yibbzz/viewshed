@@ -145,3 +145,41 @@ def test_shadow_no_data_and_errors():
         viewshed.shadow(z, GT, 180.0, 30.0, target_height=-1.0)
     with pytest.raises(ValueError):
         viewshed.shadow(z, GT, 180.0, 30.0, refraction=1.5)
+
+
+def test_reverse_viewshed_equals_a_viewshed_from_every_cell():
+    rng = np.random.default_rng(5)
+    n = 15
+    z = rng.normal(0, 2, (n, n)).cumsum(1)
+    z[4, 9] = np.nan
+    gt = (0.0, 1.0, 0.0, float(n), 0.0, -1.0)
+    tr, tc = 6, 3
+    kw = dict(curvature=True, refraction=0.13, earth_radius=40.0, max_distance=11.0)
+    for surface in ("rviewshed", "bilinear"):
+        rev = viewshed.reverse_viewshed(z, gt, (tc + 0.5, n - tr - 0.5), target_height=4.0,
+                                        observer_height=1.5, surface=surface, **kw)
+        assert rev.dtype == bool and rev.shape == z.shape and not rev[4, 9]
+        compared = 0
+        for r in range(n):
+            for c in range(n):
+                try:
+                    seen = viewshed.viewshed(z, gt, (c + 0.5, n - r - 0.5), observer_height=1.5,
+                                             target_height=4.0, surface=surface, **kw)
+                except ValueError:   # no-data, or (bilinear) a centre beside a no-data patch
+                    continue
+                assert rev[r, c] == seen[tr, tc], (surface, r, c)
+                compared += 1
+        assert compared > 200 and 0 < rev.sum() < compared
+
+
+def test_reverse_viewshed_errors_name_the_target():
+    z = wall()
+    with pytest.raises(ValueError, match="the target is outside the raster"):
+        viewshed.reverse_viewshed(z, GT, (100.0, 0.0))
+    z[20, 20] = np.nan
+    with pytest.raises(ValueError, match="no height data under the target"):
+        viewshed.reverse_viewshed(z, GT, (20.5, 20.5))
+    with pytest.raises(ValueError, match="target_height"):
+        viewshed.reverse_viewshed(z, GT, (5.5, 5.5), target_height=-1.0)
+    with pytest.raises(ValueError, match="surface"):
+        viewshed.reverse_viewshed(z, GT, (5.5, 5.5), surface="nope")

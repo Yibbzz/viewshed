@@ -40,8 +40,6 @@ fn viewshed_py<'py>(
     earth_radius: f64,
     surface_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
-    let z = dem.as_slice()?;
     let opts = Options {
         observer_height,
         target_height,
@@ -51,10 +49,55 @@ fn viewshed_py<'py>(
         refraction,
         earth_radius,
     };
+    mask(py, dem, transform, x, y, &opts, vs::viewshed)
+}
+
+/// Cells (bool, the DEM's shape) from which the target at (x, y) is visible.
+#[pyfunction(name = "reverse_viewshed")]
+#[allow(clippy::too_many_arguments)]
+fn reverse_viewshed_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    x: f64,
+    y: f64,
+    observer_height: f64,
+    target_height: f64,
+    max_distance: Option<f64>,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+    surface_name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let opts = Options {
+        observer_height,
+        target_height,
+        max_distance,
+        surface: surface(surface_name)?,
+        curvature,
+        refraction,
+        earth_radius,
+    };
+    mask(py, dem, transform, x, y, &opts, vs::reverse_viewshed)
+}
+
+type MaskFn = fn(&Grid, f64, f64, &Options) -> Result<Vec<bool>, vs::Error>;
+
+fn mask<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    x: f64,
+    y: f64,
+    opts: &Options,
+    f: MaskFn,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
     let seen = py
         .detach(|| {
             let grid = Grid::new(z, rows, cols, transform)?;
-            vs::viewshed(&grid, x, y, &opts)
+            f(&grid, x, y, opts)
         })
         .map_err(value_error)?;
     Ok(PyArray1::from_vec(py, seen).reshape([rows, cols])?.into_any())
@@ -123,6 +166,7 @@ fn shadow_py<'py>(
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
+    m.add_function(wrap_pyfunction!(reverse_viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(ztv_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
     m.add("MEAN_EARTH_RADIUS", vs::MEAN_EARTH_RADIUS)?;

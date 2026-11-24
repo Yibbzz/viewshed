@@ -17,6 +17,9 @@ averaged from the four cells meeting there), and a target is hidden when a
 closer cell's gradient, interpolated by angle in the target's direction, is
 steeper. `surface="bilinear"` is exact line of sight on the bilinear surface instead.
 
+`reverse_viewshed` turns the question round: from which cells can a target
+(a mast top, a roof) be seen?
+
 `shadow` gives exact cast shadows on the same bilinear surface for a sun at a
 given azimuth and elevation.
 
@@ -32,7 +35,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.2.0"
-__all__ = ["viewshed", "ztv", "shadow", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "ztv", "shadow", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -83,6 +86,36 @@ def viewshed(dem, transform, observer, observer_height=1.6, target_height=0.0,
     return _viewshed.viewshed(_dem(dem), _transform(transform), x, y, float(observer_height),
                               float(target_height), _distance(max_distance), bool(curvature),
                               float(refraction), float(earth_radius), str(surface))
+
+
+def reverse_viewshed(dem, transform, target, target_height=0.0, observer_height=1.6,
+                     max_distance=None, curvature=True, refraction=0.13,
+                     earth_radius=MEAN_EARTH_RADIUS, surface="rviewshed"):
+    """From which cells can `target` = (x, y) be seen? A bool array shaped like `dem`.
+
+    target_height: the target's height above the surface at (x, y) (a mast, a roof).
+    observer_height: eye height above the surface at every cell.
+    max_distance, curvature, refraction, earth_radius, surface: as for `viewshed`.
+
+    A cell is True when an observer standing there sees the target: for every cell,
+    the same answer as `viewshed` from that cell, read at the target's cell.
+    With surface="bilinear" this costs one exact viewshed (sightlines, the blocking
+    rule and the curvature drop are the same in both directions, so it is a viewshed
+    from the target with the two heights swapped); the target stays at its exact
+    point. The default "rviewshed" model is not symmetric, so every cell looks at the
+    target's cell centre in turn (as `ztv` does): exact for the model, but slower.
+    No-data cells are False.
+    """
+    _heights(("target_height", target_height), ("observer_height", observer_height))
+    x, y = (float(v) for v in target)
+    try:
+        return _viewshed.reverse_viewshed(_dem(dem), _transform(transform), x, y,
+                                          float(observer_height), float(target_height),
+                                          _distance(max_distance), bool(curvature),
+                                          float(refraction), float(earth_radius), str(surface))
+    except ValueError as e:
+        msg = str(e).replace("the observer", "the target")
+        raise ValueError(msg) from None
 
 
 def ztv(dem, transform, targets, observer_height=2.0, max_distance=None, method="forward",

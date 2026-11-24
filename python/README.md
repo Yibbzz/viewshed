@@ -11,6 +11,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
+- **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
@@ -32,6 +33,9 @@ seen = viewshed.viewshed(dem, gt, observer=(20.5, 20.5), observer_height=1.6)   
 # zone of theoretical visibility: how many blade tips each cell can see from 2 m
 tips = [(10.5, 30.5, 150.0), (30.5, 30.5, 150.0)]
 counts = viewshed.ztv(dem, gt, tips, observer_height=2.0)                      # uint32 array
+
+# reverse viewshed: from which cells is the top of a 30 m mast visible?
+seen_from = viewshed.reverse_viewshed(dem, gt, target=(20.5, 35.5), target_height=30.0)  # bool array
 
 # exact shadow map for a sun in the south-east, 30 degrees up
 lit = viewshed.shadow(dem, gt, azimuth=135.0, elevation=30.0)                  # bool array
@@ -63,6 +67,17 @@ Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cor
 | Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
 The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
+
+## Reverse viewshed
+
+`reverse_viewshed` turns the question round: from which cells can a target at (x, y), `target_height` above the ground, be seen by an observer `observer_height` above each cell?
+
+```python
+seen_from = viewshed.reverse_viewshed(dem, transform, target=(x, y), target_height=30.0,
+                                      observer_height=1.6, surface="bilinear")   # bool array
+```
+
+A cell is `True` when a viewshed from that cell would show the target, for every cell. On the bilinear surface that costs one exact viewshed: the sightline is the same segment both ways, the blocking rule (strictly below the surface along a stretch of positive length) doesn't depend on direction, and the curvature drop below the chord at a point is the same seen from either end, so it is the viewshed from the target with the two heights swapped (checked against the exact oracle run forwards from every cell). The target stays at its exact point; observers stand at cell centres. The `"rviewshed"` model isn't symmetric (only cells nearer the observer block), so there every cell looks at the target's cell centre in turn, as `ztv` does: exact for the model but slower (2,001 × 2,001, 4 cores: 6.7 s, against 2.3 s for the bilinear reverse viewshed and 1.4 s for an ordinary r.viewshed-model viewshed). Taking the viewshed from the target instead differed on 0.2–1.1% of cells in our tests (41 × 41 rough rasters).
 
 ## Shadow maps
 
