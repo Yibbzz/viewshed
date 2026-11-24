@@ -422,9 +422,8 @@ mod tests {
                         let want = match viewshed(&g, x, y, &fwd_opts) {
                             Ok(v) => v[tr * n + tc],
                             Err(Error::ObserverOnNoData) => {
-                                // no-data cell, or (bilinear) a cell centre whose lower-right
-                                // patch has no surface: no forward answer to compare with
-                                assert!(!rev[r * n + c] || surface == Surface::Bilinear);
+                                // only a no-data cell has no ground under its centre
+                                assert!(z[r * n + c].is_nan() && !rev[r * n + c]);
                                 continue;
                             }
                             Err(e) => panic!("{e}"),

@@ -33,7 +33,7 @@ import numpy as np
 
 from . import certify
 
-VERSION = "bilinear-3"   # 2: earth curvature and refraction; 3: certified float decisions
+VERSION = "bilinear-4"   # 2: earth curvature and refraction; 3: certified float decisions; 4: observer on a patch edge or vertex next to no-data
 
 
 def _corners(z, r0, c0):
@@ -104,14 +104,19 @@ def _blocked_exact(z, transform, x, y, ground, oh, r, c, th, drop=0.0):
 
 
 def _ground_exact(z, transform, x, y):
+    """Exact surface height at (x, y), None on no-data. A point on a patch edge or at a
+    grid vertex lies in two or four patches; any of them with a surface gives the same
+    height (neighbouring patches agree along a shared edge)."""
     F = Fraction
     u = (F(x) - F(transform[0])) / F(transform[1]) - F(1, 2)
     v = (F(y) - F(transform[3])) / F(transform[5]) - F(1, 2)
     c0, r0 = math.floor(u), math.floor(v)
-    cs = _corners(z, r0, c0)
-    if any(math.isnan(q) for q in cs):
-        return None
-    return _bilinear(tuple(F(q) for q in cs), u - c0, v - r0)
+    for r in ([r0, r0 - 1] if v == r0 else [r0]):
+        for c in ([c0, c0 - 1] if u == c0 else [c0]):
+            cs = _corners(z, r, c)
+            if not any(math.isnan(q) for q in cs):
+                return _bilinear(tuple(F(q) for q in cs), u - c, v - r)
+    return None
 
 
 def drop_factor(curvature, refraction, earth_radius):

@@ -9,6 +9,9 @@ All notable changes to `viewshed` (the Rust crate and the Python package, which 
   - `surface="bilinear"`: one exact viewshed from the target with the heights swapped (sightlines, the blocking rule and the curvature drop are symmetric). Checked against the exact oracle run forwards from every cell, on tie-heavy rasters with holes and curvature, with the target on and off a cell centre.
   - `surface="rviewshed"` (default): that model isn't symmetric, so every cell looks at the target in turn, as `ztv` does. Exact for the model, but slower (about 5× an ordinary viewshed at 2,001 × 2,001).
 
+### Fixed
+- `surface="bilinear"`: an observer exactly on a cell centre or on a line between cell centres was rejected ("no height data under the observer") when the patch to its lower right had no data, even though a neighbouring patch with data defines the ground there. Any patch containing the point now gives its height (they agree along shared edges). Same fix in the reference oracle (version `bilinear-4`).
+
 ## 0.2.0 (2026-11-24)
 
 ### Added

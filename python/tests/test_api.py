@@ -165,7 +165,8 @@ def test_reverse_viewshed_equals_a_viewshed_from_every_cell():
                 try:
                     seen = viewshed.viewshed(z, gt, (c + 0.5, n - r - 0.5), observer_height=1.5,
                                              target_height=4.0, surface=surface, **kw)
-                except ValueError:   # no-data, or (bilinear) a centre beside a no-data patch
+                except ValueError:   # only a no-data cell has no ground under its centre
+                    assert np.isnan(z[r, c]) and not rev[r, c]
                     continue
                 assert rev[r, c] == seen[tr, tc], (surface, r, c)
                 compared += 1

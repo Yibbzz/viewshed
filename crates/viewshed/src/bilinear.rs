@@ -1175,20 +1175,33 @@ fn blocked_exact_at(grid: &Grid, s: &Setup, cell_patches: &[(i64, i64)], r: i64,
 }
 
 /// Exact bilinear ground height at the observer, None on no-data.
+///
+/// A point on a patch edge or at a grid vertex lies in two or four patches; any of
+/// them with a surface gives the same height (neighbouring patches agree along a
+/// shared edge), so the observer has ground if any patch containing it has a surface.
 fn ground_exact(grid: &Grid, ue: &BigRational, ve: &BigRational) -> Option<BigRational> {
     let (c0, r0) = (ifloor(ue), ifloor(ve));
-    let p = corners(grid, r0, c0);
-    if nodata(&p) {
-        return None;
-    }
+    let on_c = ue.is_integer();
+    let on_r = ve.is_integer();
+    let rs: &[i64] = if on_r { &[r0, r0 - 1] } else { &[r0] };
+    let cs: &[i64] = if on_c { &[c0, c0 - 1] } else { &[c0] };
     let one = BigRational::from_integer(BigInt::from(1));
-    let tc = ue - BigRational::from_integer(BigInt::from(c0));
-    let tr = ve - BigRational::from_integer(BigInt::from(r0));
-    let (z00, z01, z10, z11) = (rat(p.z00), rat(p.z01), rat(p.z10), rat(p.z11));
-    Some(
-        (&z00 * (&one - &tc) + &z01 * &tc) * (&one - &tr)
-            + (&z10 * (&one - &tc) + &z11 * &tc) * &tr,
-    )
+    for &pr in rs {
+        for &pc in cs {
+            let p = corners(grid, pr, pc);
+            if nodata(&p) {
+                continue;
+            }
+            let tc = ue - BigRational::from_integer(BigInt::from(pc));
+            let tr = ve - BigRational::from_integer(BigInt::from(pr));
+            let (z00, z01, z10, z11) = (rat(p.z00), rat(p.z01), rat(p.z10), rat(p.z11));
+            return Some(
+                (&z00 * (&one - &tc) + &z01 * &tc) * (&one - &tr)
+                    + (&z10 * (&one - &tc) + &z11 * &tc) * &tr,
+            );
+        }
+    }
+    None
 }
 
 /// Whether cell (r, c) is within max_distance of the observer, decided exactly:

@@ -108,6 +108,38 @@ def near_blocker_jobs(n_jobs=24, seed=29):
         yield Job(dem, gt, obs, eye, [0.0, 0.0, 1.0][k % 3], None, bool(k % 2), 0.13, 6371008.8)
 
 
+def beside_nodata_jobs(n_jobs=24, seed=31):
+    """Observers exactly on a grid vertex (a cell centre) or on a patch edge, where some
+    of the patches containing the point have no surface and others do: the ground there
+    comes from any patch with a surface (they agree along shared edges)."""
+    rng = np.random.default_rng(seed)
+    for k in range(n_jobs):
+        n = int(rng.integers(8, 30))
+        dem = rng.normal(0, rng.uniform(0.2, 3), (n, n)).cumsum(0)
+        if k % 2:
+            dem = np.round(dem)
+        res = [1.0, 0.5, 2.0][k % 3]
+        gt = (0.0, res, 0.0, n * res, 0.0, -res)
+        r0, c0 = (int(v) for v in rng.integers(1, n - 2, 2))
+        dem[r0, c0] = dem[r0, c0 + 1] = dem[r0 + 1, c0] = 1.0
+        kind = k % 3     # vertex, vertical edge, horizontal edge (in centre coordinates)
+        # knock out the lower-right patch (the one a floor() lookup picks), and at a
+        # vertex sometimes one more, never all the patches containing the point
+        dem[rng.random((n, n)) < 0.03] = np.nan
+        dem[r0:r0 + 2, c0:c0 + 2] = 1.0
+        dem[r0 - 1:r0 + 2, c0 - 1] = np.where(np.isnan(dem[r0 - 1:r0 + 2, c0 - 1]), 2.0,
+                                              dem[r0 - 1:r0 + 2, c0 - 1])
+        dem[r0 - 1, c0:c0 + 2] = np.where(np.isnan(dem[r0 - 1, c0:c0 + 2]), 2.0, dem[r0 - 1, c0:c0 + 2])
+        dem[r0 + 1, c0 + 1] = np.nan
+        if kind == 0 and k % 2:
+            dem[r0 - 1, c0 + 1] = np.nan
+        fx, fy = [(0.5, 0.5), (0.5, 0.5 + float(rng.uniform(0.05, 0.95))),
+                  (0.5 + float(rng.uniform(0.05, 0.95)), 0.5)][kind]
+        obs = (gt[0] + (c0 + fx) * res, gt[3] - (r0 + fy) * res)
+        yield Job(dem, gt, obs, float(rng.uniform(0, 4)), [0.0, 1.0][k % 2],
+                  None if k % 4 else 6.0 * res, bool(k % 2), 0.13, [6371008.8, 30.0 * res][k % 2])
+
+
 def fixed_jobs():
     for f in datasets.DATASETS.values():
         for th in datasets.TARGET_HEIGHTS:
@@ -124,7 +156,8 @@ def _oracle(job):
 
 
 @pytest.mark.parametrize("mode", ["rows", "horizon", "sector", "sector4"])
-@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs(), *near_lattice_jobs(), *near_blocker_jobs()])
+@pytest.mark.parametrize("job", [*fixed_jobs(), *random_jobs(), *near_lattice_jobs(), *near_blocker_jobs(),
+                                 *beside_nodata_jobs()])
 def test_bilinear_equals_oracle(job, mode, monkeypatch):
     # the crate picks a mode per raster (row-major walk, or rings with the horizon
     # filters); both are exact, and both are checked here on every job
@@ -141,3 +174,11 @@ def test_bilinear_equals_oracle(job, mode, monkeypatch):
         return
     ours = RUST.run(job)
     assert (ours == theirs).all(), f"differs at {np.argwhere(ours != theirs)[:5].tolist()}"
+
+
+def test_observer_beside_nodata_has_ground():
+    """Every beside_nodata job has ground under the observer (in the oracle, so the
+    equality test above really compares viewsheds rather than skipping)."""
+    from conformance import oracle
+    for job in beside_nodata_jobs():
+        assert oracle._ground_exact(job.dem, job.gt, *job.observer) is not None
