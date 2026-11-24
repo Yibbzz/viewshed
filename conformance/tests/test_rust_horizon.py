@@ -145,3 +145,22 @@ def test_flat_is_exactly_zero():
     got = run(_bin(), z, (0.0, 1.0, 0.0, 6.0, 0.0, -1.0), 0.0, False, ["az", "63.0"])
     # every cell with ground ahead reports exactly 0 (not a tiny negative from rounding)
     assert ((got == 0.0) | (got == -90.0)).all() and (got == 0.0).any(), got
+
+
+@pytest.mark.parametrize("seed", [2, 3, 6])
+def test_near_planar_patches_certified(seed):
+    # a tilted plane with 1e-3 m noise: f' near 0 at both ends of many stretches, where the reach
+    # bound alone left enclosures ~1e-4 wide (VIEWSHED_HORIZON_CHECK tripped in the fallback before the
+    # two-tangent bound, 2026-11-24); run() sets CHECK, and values must match the oracle
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:15, 0:15]
+    z = 7.25 + 0.3 * x + 0.1 * y + np.round(rng.normal(0, 1e-3, (15, 15)), 4)
+    gt = (500000.37, 0.5, 0.0, 4000000.61, 0.0, -0.5)
+    for dx, dy in [(1.0, 1.0), (0.8, 0.6), (-1.0, 2.0)]:
+        got = run(_bin(), z, gt, 0.0, False, ["vec", num(dx), num(dy)])
+        _, want = ho.horizon_map(z, gt, (dx, dy), 0.0, False, earth_radius=50.0 * 0.5 * 15)
+        for g, w in zip(got.ravel(), want.ravel()):
+            if w == -math.inf:
+                assert g == -math.inf, (seed, (dx, dy), g)
+                continue
+            assert abs(g - w) <= 1e-9 * 0.5 + 1e-12 * abs(w) + 1e-13 * max(1.0, abs(w)), (seed, (dx, dy), g, w)

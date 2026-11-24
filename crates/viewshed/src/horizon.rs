@@ -342,12 +342,39 @@ impl<'a> H<'a> {
             fpl + epl < 0.0
         };
         if !(fph - eph > 0.0 || left_neg) {
+            // f = A s + B + C / s is convex or concave on the whole stretch (f'' = 2 C / s^3). Convex:
+            // the endpoint values above bound the sup. Concave: f lies below each of its tangent
+            // lines, so both bounds below hold and the smaller is used (the reach bound alone is
+            // loose when tangent_x misses the optimum, e.g. nearly planar patches: 7e-5 seen)
+            let mut interior = f64::INFINITY;
             let x = tangent_x(lo_e, hi_e);
             if x > 0.0 {
                 let (fx, ex) = f_at(x);
                 let (fpx, epx) = fp_at(x);
                 let reach = (fpx.abs() + epx) * (x - lo_e).max(hi_e - x);
-                vhi = vhi.max(up(fx + ex + reach));
+                interior = up(fx + ex + reach);
+            }
+            if lo_e > 0.0 {
+                // tangents at both ends, errors in the safe direction: f(s) <= f1 + m1 (s - lo_e) and
+                // f(s) <= f2 + m2 (s - hi_e) on [lo_e, hi_e]; here m1 >= 0 >= m2 (this branch)
+                let (fl, el) = f_at(lo_e);
+                let (fpl, epl) = fp_at(lo_e);
+                let (f1, m1, f2, m2) = (fl + el, fpl + epl, fh + eh, fph - eph);
+                let w = hi_e - lo_e;
+                // max over [0, w] of min(f1 + m1 t, f2 + m2 (t - w)): at the crossing, clamped
+                let best = if m1 - m2 > 0.0 {
+                    let t = ((f2 - m2 * w - f1) / (m1 - m2)).clamp(0.0, w);
+                    (f1 + m1 * t).min(f2 + m2 * (t - w))
+                } else {
+                    f1.min(f2)
+                };
+                // rounding of the lines' values, and of t: min of the lines is (m1 - m2)-Lipschitz
+                // in t, and |t error| (m1 - m2) <= 4U (|f1| + |f2| + |m2| w) + 4U (m1 - m2) w
+                let slack = ERR * (f1.abs() + f2.abs() + (m1.abs() + m2.abs()) * w);
+                interior = interior.min(up(best + slack));
+            }
+            if interior < f64::INFINITY {
+                vhi = vhi.max(interior);
             }
         }
         // lower bound at points certainly inside the stretch
