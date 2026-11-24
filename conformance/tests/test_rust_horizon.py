@@ -174,3 +174,59 @@ def test_near_planar_patches_certified(seed):
                 assert g == -math.inf, (seed, (dx, dy), g)
                 continue
             assert abs(g - w) <= 1e-9 * 0.5 + 1e-12 * abs(w) + 1e-13 * max(1.0, abs(w)), (seed, (dx, dy), g, w)
+
+
+CUT_VECS = [(1.0, 0.0), (0.8, 0.6), (-1.0, 2.0), (0.31, -0.95)]
+
+
+@pytest.mark.parametrize("fallback", list(PATHS))
+@pytest.mark.parametrize("name,z,gt", [x for i, x in enumerate(rasters()) if i % 3 == 0], ids=lambda v: v if isinstance(v, str) else "")
+def test_cut_within_tolerance_of_exact(name, z, gt, fallback):
+    # max_distance R (map units): own patch only (0.4 res), mid-patch, whole cells; curvature on half
+    res = abs(gt[1])
+    for i, (dx, dy) in enumerate(CUT_VECS):
+        th, curv = (0.0, False) if i % 2 == 0 else (0.5, True)
+        for R in (0.4 * res, 1.7 * res, 3.0 * res):
+            env = {**(PATHS[fallback] or {}), "RAW_HORIZON_MAX_DISTANCE": repr(R)}
+            got = run(_bin(), z, gt, th, curv, ["vec", num(dx), num(dy)], env=env)
+            _, want = ho.horizon_map(z, gt, (dx, dy), th, curv, earth_radius=50.0 * res * max(z.shape), max_dist=R)
+            ok = ~np.isnan(z)
+            assert np.array_equal(np.isnan(got), ~ok), name
+            for g, w in zip(got[ok], want[ok]):
+                if w == -math.inf:
+                    assert g == -math.inf, (name, (dx, dy), R, g)
+                    continue
+                assert abs(g - w) <= 1e-9 * res + 1e-12 * abs(w) + 1e-13 * max(1.0, abs(w)), (name, (dx, dy), R, th, g, w)
+
+
+@pytest.mark.parametrize("fallback", list(PATHS))
+def test_cut_inclusive_boundaries(fallback):
+    gt = (0.0, 2.0, 0.0, 30.0, 0.0, -2.0)
+    # (a) patch-edge distance: east ray along a row, flat then a 30 m wall 4 cells out (the patch edge at
+    # s = 3 is where the ramp up to the wall starts): R = 3 cells sees only flat ground (0), 3.5 the ramp
+    z = np.zeros((7, 15)); z[:, 7] = 30.0
+    for R, want in ((3 * 2.0, 0.0), (3.5 * 2.0, 15.0 / 3.5), (4 * 2.0, 30.0 / 4.0)):
+        got = run(_bin(), z, gt, 0.0, False, ["vec", "1.0", "0.0"], env={**(PATHS[fallback] or {}), "RAW_HORIZON_MAX_DISTANCE": repr(R)})
+        assert abs(got[3, 3] - want) <= 1e-9 * 2.0 + 1e-12 * want, (R, got[3, 3], want)
+    # (b) vertex at exactly R with the horizon attained there (a single peak cell): direction (3, 4)
+    # (L = 5) from (1, 1) meets vertex (5, 4) at s = 1, distance 5 cells = 10 m; inclusive -> peak counts
+    z = np.zeros((9, 9)); z[5, 4] = 50.0
+    ex_in = ho.horizon_exact(z, 1, 1, 3.0, 4.0, 0.0, 2.0, 0.0, 10.0).approx()
+    ex_out = ho.horizon_exact(z, 1, 1, 3.0, 4.0, 0.0, 2.0, 0.0, 9.999999).approx()
+    assert ex_in == 50.0 and ex_out < 50.0                      # the tie at the boundary is included
+    for R, want in ((10.0, ex_in), (9.999999, ex_out)):
+        got = run(_bin(), z, gt[:3] + (18.0,) + gt[4:], 0.0, False, ["vec", "3.0", "4.0"], env={**(PATHS[fallback] or {}), "RAW_HORIZON_MAX_DISTANCE": repr(R)})
+        assert abs(got[1, 1] - want) <= 1e-9 * 2.0 + 1e-12 * abs(want), (R, got[1, 1], want)
+
+
+def test_cut_nonpositive_and_huge():
+    z = np.round(np.random.default_rng(5).normal(0, 3.0, (8, 9)).cumsum(0), 2)
+    z[2, 3] = np.nan
+    gt = (0.0, 1.0, 0.0, 8.0, 0.0, -1.0)
+    free = run(_bin(), z, gt, 0.0, False, ["vec", "0.8", "0.6"])
+    huge = run(_bin(), z, gt, 0.0, False, ["vec", "0.8", "0.6"], env={"RAW_HORIZON_MAX_DISTANCE": "1e9"})
+    assert np.array_equal(free, huge, equal_nan=True)
+    for R in ("0.0", "-3.0", "nan"):
+        got = run(_bin(), z, gt, 0.0, False, ["vec", "0.8", "0.6"], env={"RAW_HORIZON_MAX_DISTANCE": R})
+        ok = ~np.isnan(z)
+        assert np.array_equal(np.isnan(got), ~ok) and (got[ok] == -math.inf).all(), R

@@ -8,6 +8,9 @@ T is shadowed by a sun (dx, dy, dz) iff Hs(T) > dz (shadow_oracle's semantics).
 Per patch the quotient is A s + Bq + C / s (A = e3 dx dy - k res^2 L^2, Bq = slope terms, C = B(T) -
 z_T - th), so Hs is a rational or p + r sqrt(m) with rationals: exact via Alg below.
 Returns: an exact Alg (or None for -inf: nothing ahead) and its correctly rounded float.
+Optional distance cut (max_dist R, map units): only ray points at horizontal distance s L res <= R count,
+i.e. s <= s* = R / (res L), L = sqrt(dx^2 + dy^2). s* is irrational in general, but f(s*) = B +
+(A R / (res L^2) + C res / R) sqrt(L^2) is again p + r sqrt(m), and s <= s* iff s^2 L^2 res^2 <= R^2.
 """
 
 import math
@@ -113,12 +116,34 @@ def _patch_sup(A, B, C, lo, hi):
     return best
 
 
-def horizon_exact(z, r, c, dx, dy, drop, res, th=0.0):
-    """Exact Hs(T) as an Alg, or None if no data patch lies ahead."""
+def _patch_sup_cut(A, B, C, lo, L2, res, R):
+    """Exact sup of A s + B + C / s over s in [lo, s*] (or (0, s*] if lo == 0), s* = R / (res sqrt(L2))."""
+    s2 = R * R / (res * res * L2)                    # s*^2, rational
+    cands = [Alg(B, A * R / (res * L2) + C * res / R, L2)]
+    if lo > 0:
+        cands.append(Alg(A * lo + B + C / lo))
+    elif C == 0:
+        cands.append(Alg(B))
+    if C < 0 and A < 0:
+        m = C / A
+        if (lo == 0 or lo * lo < m) and m < s2:
+            cands.append(Alg(B, -2, A * C))
+    best = cands[0]
+    for x in cands[1:]:
+        if x.gt(best):
+            best = x
+    return best
+
+
+def horizon_exact(z, r, c, dx, dy, drop, res, th=0.0, max_dist=None):
+    """Exact Hs(T) as an Alg, or None if no data patch lies ahead (within max_dist, if given)."""
     rows, cols = z.shape
     zT = Q(float(z[r, c])) + Q(th)
     dxq, dyq = Q(dx), Q(dy)
-    curv = Q(drop) * Q(res) * Q(res) * (dxq * dxq + dyq * dyq)
+    L2 = dxq * dxq + dyq * dyq
+    curv = Q(drop) * Q(res) * Q(res) * L2
+    resq = Q(res)
+    R = None if max_dist is None else Q(max_dist)
     best = None
     for r0, c0 in _candidates(rows, cols, r, c, float(dx), float(dy)):
         zc = _corners(z, r0, c0)
@@ -134,19 +159,25 @@ def horizon_exact(z, r, c, dx, dy, drop, res, th=0.0):
         lo, hi = max(Q(0), iu[0], iv[0]), min(his)
         if hi <= lo:
             continue
+        cut = False
+        if R is not None:
+            # beyond s*: lo >= s* (lo > 0) -> nothing of positive length within the cut
+            if lo > 0 and lo * lo * L2 * resq * resq >= R * R:
+                continue
+            cut = hi * hi * L2 * resq * resq > R * R
         z00, z01, z10, z11 = (Q(float(v)) for v in zc)
         e3 = z00 - z01 - z10 + z11
         u0, v0 = Q(c) - c0, Q(r) - r0
         A = e3 * dxq * dyq - curv
         B = (z01 - z00) * dxq + (z10 - z00) * dyq + e3 * (u0 * dyq + v0 * dxq)
         C = z00 + (z01 - z00) * u0 + (z10 - z00) * v0 + e3 * u0 * v0 - zT
-        v = _patch_sup(A, B, C, lo, hi)
+        v = _patch_sup_cut(A, B, C, lo, L2, resq, R) if cut else _patch_sup(A, B, C, lo, hi)
         if best is None or v.gt(best):
             best = v
     return best
 
 
-def horizon_map(z, transform, vec, target_height=0.0, curvature=False, refraction=0.13, earth_radius=6371008.8):
+def horizon_map(z, transform, vec, target_height=0.0, curvature=False, refraction=0.13, earth_radius=6371008.8, max_dist=None):
     """(exact Alg-or-None array, correctly rounded float array; -inf if nothing ahead, NaN no-data)."""
     z = np.ascontiguousarray(z, dtype=float)
     dx, dy = float(vec[0]), float(vec[1])
@@ -158,7 +189,7 @@ def horizon_map(z, transform, vec, target_height=0.0, curvature=False, refractio
         for c in range(z.shape[1]):
             if z[r, c] != z[r, c]:
                 continue
-            h = horizon_exact(z, r, c, dx, dy, drop, res, target_height)
+            h = horizon_exact(z, r, c, dx, dy, drop, res, target_height, max_dist)
             ex[r, c] = h
             fl[r, c] = -math.inf if h is None else h.rounded()
     return ex, fl

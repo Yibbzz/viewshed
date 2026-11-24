@@ -12,7 +12,9 @@ fn main() {
     let p = |i: usize| a[i].parse::<f64>().unwrap();
     let (rows, cols) = (a[2].parse().unwrap(), a[3].parse().unwrap());
     let grid = Grid::new(&z, rows, cols, [p(4), p(5), 0.0, p(6), 0.0, -p(5)]).unwrap();
-    let opts = HorizonOptions { target_height: p(8), curvature: a[9] == "1", refraction: p(10), earth_radius: p(11) };
+    // RAW_HORIZON_MAX_DISTANCE: the distance cut (tests)
+    let max_distance = env::var("RAW_HORIZON_MAX_DISTANCE").ok().map(|v| v.parse::<f64>().expect("max distance"));
+    let opts = HorizonOptions { target_height: p(8), curvature: a[9] == "1", refraction: p(10), earth_radius: p(11), max_distance };
     let t = Instant::now();
     let h = if a[12] == "az" { horizon_map(&grid, p(13), &opts).unwrap() } else { horizon_rise_vec(&grid, [p(13), p(14)], &opts).unwrap() };
     println!("{}", t.elapsed().as_secs_f64());

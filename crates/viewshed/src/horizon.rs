@@ -37,11 +37,16 @@ pub struct HorizonOptions {
     pub curvature: bool,
     pub refraction: f64,
     pub earth_radius: f64,
+    /// Horizontal distance limit, in the raster's units (as [`Options::max_distance`](crate::Options)):
+    /// only ground within it (inclusive) counts. `None`: unlimited. Not > 0 (0, negative, NaN):
+    /// nothing lies within it, so every cell with data gets -90. The curvature drop still uses the
+    /// true distance.
+    pub max_distance: Option<f64>,
 }
 
 impl Default for HorizonOptions {
     fn default() -> Self {
-        HorizonOptions { target_height: 0.0, curvature: true, refraction: 0.13, earth_radius: MEAN_EARTH_RADIUS }
+        HorizonOptions { target_height: 0.0, curvature: true, refraction: 0.13, earth_radius: MEAN_EARTH_RADIUS, max_distance: None }
     }
 }
 
@@ -70,7 +75,13 @@ pub fn horizon_rise_vec(grid: &Grid, v: [f64; 2], opts: &HorizonOptions) -> Resu
     if k < 0.0 || !k.is_finite() {
         return Err(Error::UnsupportedRefraction);
     }
-    Ok(H::new(grid, dx, dy, k, opts.target_height).run())
+    if let Some(rmax) = opts.max_distance {
+        if !(rmax > 0.0) {
+            // nothing within the limit: -inf (nothing ahead) on every cell with data
+            return Ok(grid.z.iter().map(|v| if v.is_nan() { f64::NAN } else { f64::NEG_INFINITY }).collect());
+        }
+    }
+    Ok(H::new(grid, dx, dy, k, opts.target_height, opts.max_distance).run())
 }
 
 struct H<'a> {
@@ -95,6 +106,12 @@ struct H<'a> {
     force_fallback: bool,
     /// test hook (VIEWSHED_HORIZON_EXACT_ALL, with the above): the fallback's rational branch for all
     force_exact: bool,
+    /// distance cut (max_distance R > 0): the exact cut s* = R / (res L) on the ray parameter lies in
+    /// [smax_lo, smax_hi] (floats; infinite without a cut); rmax = R
+    cut: bool,
+    rmax: f64,
+    smax_lo: f64,
+    smax_hi: f64,
     /// lateral detrend of the hull points (VIEWSHED_HORIZON_NODETREND turns it off: tests, timing)
     detrend: bool,
     /// prune ties within tol/2 (VIEWSHED_HORIZON_NOTIE turns it off)
@@ -111,9 +128,17 @@ struct Ent {
 }
 
 impl<'a> H<'a> {
-    fn new(grid: &'a Grid<'a>, dx: f64, dy: f64, k: f64, th: f64) -> H<'a> {
+    fn new(grid: &'a Grid<'a>, dx: f64, dy: f64, k: f64, th: f64, max_distance: Option<f64>) -> H<'a> {
         let res = grid.res();
         let l2 = dx * dx + dy * dy;
+        // s* = R / (res sqrt(L^2)): a few roundings (rel. error <= ~5U) inside the ERR (64U) margins
+        let (smax_lo, smax_hi) = match max_distance {
+            Some(rm) if rm.is_finite() => {
+                let sf = rm / (res * l2.sqrt());
+                (down(sf * (1.0 - ERR)), up(sf * (1.0 + ERR)))
+            }
+            _ => (f64::INFINITY, f64::INFINITY),
+        };
         let (rows, cols) = (grid.rows as i64, grid.cols as i64);
         let span = (rows + cols + 4) as f64 * (dx.abs() + dy.abs());
         let zmax = grid.z.iter().filter(|v| !v.is_nan()).fold(0.0f64, |m, v| m.max(v.abs())) + th;
@@ -139,6 +164,10 @@ impl<'a> H<'a> {
             force_exact: std::env::var("VIEWSHED_HORIZON_EXACT_ALL").is_ok(),
             detrend: std::env::var("VIEWSHED_HORIZON_NODETREND").is_err(),
             tie: std::env::var("VIEWSHED_HORIZON_NOTIE").is_err(),
+            cut: smax_hi.is_finite(),
+            rmax: max_distance.unwrap_or(f64::INFINITY),
+            smax_lo,
+            smax_hi,
         };
         h.stencil = h.dda(0, 0, h.s_loc, false);
         h
@@ -258,6 +287,13 @@ impl<'a> H<'a> {
         }
         let Some((s1, s2)) = self.stretch(r, c, r0, c0) else { return NONE };
         let es = 4.0 * U * s1.abs().max(s2.abs()) + 1e-300;
+        // distance cut: the true stretch starts at >= s1 - es; beyond smax_hi >= s* nothing counts
+        if s1 - es > self.smax_hi {
+            return NONE;
+        }
+        // upper bounds over [lo_e, min(s2 + es, smax_hi)] (a superset of the stretch within the cut),
+        // lower bounds at points <= min(s2 - es, smax_lo) (certainly inside both)
+        let (s2_hi, s2_lo) = ((s2 + es).min(self.smax_hi), (s2 - es).min(self.smax_lo));
         let (dx, dy) = (self.dx, self.dy);
         let [z00, z01, z10, z11] = zc;
         let (g01, g10, e3) = (z01 - z00, z10 - z00, z00 - z01 - z10 + z11);
@@ -302,12 +338,12 @@ impl<'a> H<'a> {
             // rounding error by s)
             let al = e3 * dx * dy - self.curv;
             let ea = ERR * (e3.abs() * (dx * dy).abs() + self.curv);
-            let hi_e = s2 + es;
+            let hi_e = s2_hi;
             let vhi = up((b0 + eb0).max(b0 + al * hi_e + eb0 + ea * hi_e + ERR * (al * hi_e).abs()));
-            if s2 <= 4.0 * es {
+            if s2_lo <= 3.0 * es {
                 return (f64::NEG_INFINITY, vhi);
             }
-            let ihi = s2 - es;
+            let ihi = s2_lo;
             let vlo = down((b0 - eb0).max(b0 + al * ihi - eb0 - ea * ihi - ERR * (al * ihi).abs()));
             return (vlo, vhi);
         }
@@ -331,7 +367,7 @@ impl<'a> H<'a> {
             if lo > 0.0 { sm } else { hi }
         };
         // upper bound over the enlarged stretch (a superset)
-        let (lo_e, hi_e) = ((s1 - es).max(0.0), s2 + es);
+        let (lo_e, hi_e) = ((s1 - es).max(0.0), s2_hi);
         let (fh, eh) = f_at(hi_e);
         let mut vhi = up(fh + eh);
         if lo_e > 0.0 {
@@ -384,11 +420,11 @@ impl<'a> H<'a> {
                 vhi = vhi.max(interior);
             }
         }
-        // lower bound at points certainly inside the stretch
-        if s2 - s1 <= 4.0 * es {
+        // lower bound at points certainly inside the stretch (and the cut)
+        if s2_lo - s1 <= 3.0 * es {
             return (f64::NEG_INFINITY, vhi); // near-degenerate: existence not certain
         }
-        let (ilo, ihi) = (s1 + es, s2 - es);
+        let (ilo, ihi) = (s1 + es, s2_lo);
         let (fh, eh) = f_at(ihi);
         let mut vlo = down(fh - eh);
         if s1 > 0.0 {
@@ -601,6 +637,9 @@ impl<'a> H<'a> {
         qs.sort_unstable_by(|x, y| y.0.total_cmp(&x.0));
         let mut out = Vec::with_capacity(qs.len());
         let mut jj = 0usize;
+        // distance cut: entries [0, j0) lie wholly beyond s* (stored a_min > a_T + s* L^2, rounded so
+        // that it is certain); only skipped, never needed for soundness of what is kept
+        let mut j0 = 0usize;
         let mut stack: Vec<(usize, usize, usize)> = Vec::new();
         let mut prev = (i64::MIN, i64::MIN);
         for &(q, i) in &qs {
@@ -608,6 +647,17 @@ impl<'a> H<'a> {
                 jj += 1;
             }
             let (r, c) = ((i as i64) / cols, (i as i64) % cols);
+            if self.cut {
+                let at = self.a_of(c as f64, r as f64);
+                // a on T's ray = a_T + s L^2; fl(a_T) within e_a, fl(L^2) rel. 2U
+                let far = up(at + up(self.smax_hi * self.l2 * (1.0 + 4.0 * U)) + self.e_a + ERR * at.abs());
+                while j0 > 0 && ents[j0 - 1].amin <= far {
+                    j0 -= 1;
+                }
+                while j0 < m && ents[j0].amin > far {
+                    j0 += 1;
+                }
+            }
             let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
             let mut arg = (i64::MIN, i64::MIN);
             let take = |r0: i64, c0: i64, lo: &mut f64, hi: &mut f64, arg: &mut (i64, i64)| {
@@ -632,7 +682,7 @@ impl<'a> H<'a> {
                 }
             }
             if self.check {
-                self.check_cover(r, c, &ents[..jj]);
+                self.check_cover(r, c, &ents[j0.min(jj)..jj]);
             }
             let zt = self.grid.z[i as usize] + self.th;
             let at = self.a_of(c as f64, r as f64);
@@ -648,7 +698,7 @@ impl<'a> H<'a> {
                 stack.clear();
                 stack.push((1, 0, p2));
                 while let Some((nd, nlo, nhi)) = stack.pop() {
-                    if nlo >= jj || hr[nd].0 == hr[nd].1 {
+                    if nlo >= jj || nhi <= j0 || hr[nd].0 == hr[nd].1 {
                         continue;
                     }
                     if lo > f64::NEG_INFINITY {
@@ -720,7 +770,7 @@ impl<'a> H<'a> {
     fn check_cover(&self, r: i64, c: i64, qual: &[Ent]) {
         let local: BTreeSet<(i64, i64)> = self.stencil.iter().map(|&(dr, dc)| (r + dr, c + dc)).collect();
         let q: BTreeSet<(i64, i64)> = qual.iter().map(|e| (e.r0 as i64, e.c0 as i64)).collect();
-        for (cy, cx) in self.dda(r, c, f64::INFINITY, true) {
+        for (cy, cx) in self.dda(r, c, self.smax_hi + 2.0, true) {
             for a in -1..=1 {
                 for b in -1..=1 {
                     let (r0, c0) = (cy + a, cx + b);
@@ -728,7 +778,7 @@ impl<'a> H<'a> {
                         continue;
                     }
                     if let Some((s1, s2)) = self.stretch(r, c, r0, c0) {
-                        if s2 > s1 + 1e-9 {
+                        if s2.min(self.smax_lo) > s1 + 1e-9 {
                             assert!(local.contains(&(r0, c0)) || q.contains(&(r0, c0)),
                                 "VIEWSHED_HORIZON_CHECK: patch ({r0}, {c0}) on ({r}, {c})'s ray at s {s1}..{s2} is neither local nor a qualifying entry");
                         }
@@ -744,8 +794,21 @@ impl<'a> H<'a> {
         let q = |v: f64| BigRational::from_float(v).expect("finite");
         let int = |v: i64| BigRational::from_integer(BigInt::from(v));
         let (dxq, dyq) = (q(self.dx), q(self.dy));
+        // distance cut in rationals: s <= s* iff s^2 L^2 res^2 <= R^2; s* bracketed by floats
+        // [slo, shi] (checked here, widened by ulps if the float margins ever fell short)
+        let k2 = (&dxq * &dxq + &dyq * &dyq) * q(self.res) * q(self.res);
+        let r2 = if self.cut { q(self.rmax) * q(self.rmax) } else { BigRational::zero() };
+        let (mut slo, mut shi) = (self.smax_lo, self.smax_hi);
+        if self.cut {
+            while q(slo) * q(slo) * &k2 > r2 {
+                slo = next_dn(slo);
+            }
+            while q(shi) * q(shi) * &k2 < r2 {
+                shi = next_upf(shi);
+            }
+        }
         let mut cand = BTreeSet::new();
-        for (cy, cx) in self.dda(r, c, f64::INFINITY, true) {
+        for (cy, cx) in self.dda(r, c, self.smax_hi + 2.0, true) {
             for a in -1..=1 {
                 for b in -1..=1 {
                     if self.inside(cy + a, cx + b) {
@@ -755,7 +818,9 @@ impl<'a> H<'a> {
             }
         }
         let (mut lo_all, mut hi_all) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-        let mut stretches: Vec<(i64, i64, BigRational, BigRational)> = Vec::new();
+        // (patch, lo, hi within [lo, s*] at most slo, hi at most shi): the sup over the first is <= the
+        // true one <= the sup over the second
+        let mut stretches: Vec<(i64, i64, BigRational, BigRational, BigRational)> = Vec::new();
         for (r0, c0) in cand {
             if self.corners(r0, c0).iter().any(|v| v.is_nan()) {
                 continue;
@@ -783,28 +848,48 @@ impl<'a> H<'a> {
             if !meets || hi <= lo {
                 continue;
             }
+            let (hi_in, hi_out) = if self.cut {
+                if lo.is_positive() && &lo * &lo * &k2 >= r2 {
+                    continue; // starts at or beyond s*: no positive length within the cut
+                }
+                if &hi * &hi * &k2 > r2 {
+                    let (ql, qh) = (q(slo), q(shi));
+                    let a_ = if ql < hi { ql } else { hi.clone() };
+                    let b_ = if qh < hi { qh } else { hi.clone() };
+                    (if a_ > lo { a_ } else { lo.clone() }, b_)
+                } else {
+                    (hi.clone(), hi.clone())
+                }
+            } else {
+                (hi.clone(), hi.clone())
+            };
             // positive length certain (decided in rationals): the certified enclosure of patch_iv,
             // whose lower bound is -inf only for near-degenerate stretches; for those (now known to
             // exist) a lower bound is f at a float point within an ulp of the exact stretch, minus
             // |f'| times that distance
             let (mut vl, vh) = self.patch_iv(r, c, r0, c0);
             if vl == f64::NEG_INFINITY {
-                let mid = (&lo + &hi) / int(2);
+                let mid = (&lo + if hi_in > lo { &hi_in } else { &hi_out }) / int(2);
                 let sm = rat_to_f64(&mid);
                 vl = self.value_near(r, c, r0, c0, sm);
             }
             lo_all = lo_all.max(vl);
             hi_all = hi_all.max(vh);
-            stretches.push((r0, c0, lo, hi));
+            stretches.push((r0, c0, lo, hi_in, hi_out));
         }
         if self.force_exact || hi_all > lo_all + self.tol(lo_all) || (lo_all == f64::NEG_INFINITY && hi_all > f64::NEG_INFINITY) {
             // not expected (local errors are ~1e-10 res at most), but certified anyway: every
             // patch's sup in rational arithmetic, bracketed between adjacent floats
             assert!(!self.check || self.force_exact, "VIEWSHED_HORIZON_CHECK: fallback enclosure wider than the tolerance at ({r}, {c}): [{lo_all:e}, {hi_all:e}]");
-            let mut best = f64::NEG_INFINITY;
-            for (r0, c0, lo, hi) in &stretches {
-                best = best.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi));
+            let (mut best, mut best_out) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for (r0, c0, lo, hi_in, hi_out) in &stretches {
+                best = best.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi_in));
+                if self.cut && hi_out != hi_in {
+                    best_out = best_out.max(self.exact_patch_sup(r, c, *r0, *c0, lo, hi_out));
+                }
             }
+            // with a cut, s* is only bracketed: the sup up to shi must stay within the tolerance
+            assert!(!self.check || best_out <= best || best_out <= best + self.tol(best), "VIEWSHED_HORIZON_CHECK: cut bracket too wide at ({r}, {c}): {best:e} vs {best_out:e}");
             return best;
         }
         if lo_all < 0.0 && hi_all >= 0.0 {

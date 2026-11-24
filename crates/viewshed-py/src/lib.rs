@@ -308,7 +308,7 @@ fn horizon_map_py<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
     let z = dem.as_slice()?;
-    let opts = HorizonOptions { target_height, curvature, refraction, earth_radius };
+    let opts = HorizonOptions { target_height, curvature, refraction, earth_radius, max_distance: None };
     let h = py
         .detach(|| {
             let grid = Grid::new(z, rows, cols, transform)?;
