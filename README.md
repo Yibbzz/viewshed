@@ -47,18 +47,18 @@ Large rasters (32,768 cells or more) are computed outward from the observer in r
 
 Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cores of an i5-8500T; observer 1.6 m above the ground, curvature and refraction on):
 
-| Terrain | Observer | Visible | Time |
-| --- | --- | --- | --- |
-| Alps (Copernicus 30 m) | window centre | 0.6% | 0.22 s |
-| Alps | highest point | 11% | 0.59 s |
-| Iowa (USGS 3DEP 10 m) | window centre | 1% | 0.22 s |
-| Iowa | highest point | 6% | 0.40 s |
-| Kansas (USGS 3DEP 10 m) | window centre | 14% | 1.16 s |
-| Kansas | highest point | 37% | 1.08 s |
-| Wellington (1 m LiDAR) | window centre | 17% | 0.69 s |
-| Wellington | highest point | 48% | 1.16 s |
+| Terrain | Observer | Visible | Exact bilinear | r.viewshed-model sweep (approximate) |
+| --- | --- | --- | --- | --- |
+| Alps (Copernicus 30 m) | window centre | 0.6% | 0.21 s | 0.43 s |
+| Alps | highest point | 11% | 0.42 s | 0.55 s |
+| Iowa (USGS 3DEP 10 m) | window centre | 1% | 0.22 s | 0.43 s |
+| Iowa | highest point | 6% | 0.34 s | 0.50 s |
+| Kansas (USGS 3DEP 10 m) | window centre | 14% | 0.96 s | 0.53 s |
+| Kansas | highest point | 37% | 0.89 s | 0.62 s |
+| Wellington (1 m LiDAR) | window centre | 17% | 0.55 s | 0.51 s |
+| Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
-In the same runs, the exact bilinear result was as fast as or faster than this library's approximate r.viewshed-model sweep on the Alps and Iowa windows, and 1.3–2.7× slower on Kansas and Wellington, where more of the terrain is visible.
+The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
 
 ## Releasing
 
