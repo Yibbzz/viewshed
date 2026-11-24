@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from conformance import shadow_oracle as so  # noqa: E402
-import test_oracle_fast as tof  # noqa: E402
+import cases as tof  # noqa: E402  (numba-free: never skips this module)
 
 # lattice-aligned and general directions (dx, dy, dz): axis and diagonal rays through grid points,
 # slopes equal to integer height steps (exact ties on integer rasters), a horizontal sun

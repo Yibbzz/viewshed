@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from conformance import shadow_oracle as so  # noqa: E402
-import test_oracle_fast as tof  # noqa: E402
+import cases as tof  # noqa: E402  (numba-free: never skips this module)
 
 REPO = Path(__file__).resolve().parents[2]
 _BIN = None
