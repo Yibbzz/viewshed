@@ -31,7 +31,7 @@ import numpy as np
 
 from . import _viewshed, reference
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["viewshed", "ztv", "shadow", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
