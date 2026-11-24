@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use ::viewshed as vs;
-use vs::{Grid, LosOptions, Options, Point, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
+use vs::{Grid, HorizonOptions, LosOptions, Options, Point, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
 
 fn value_error(e: vs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -292,6 +292,32 @@ fn visibility_index_py<'py>(
     Ok((PyArray1::from_vec(py, frac).reshape([rows, cols])?.into_any(), k))
 }
 
+/// Horizon elevation angle (degrees, the DEM's shape) towards an azimuth: -90 with nothing
+/// ahead, NaN on no-data.
+#[pyfunction(name = "horizon_map")]
+#[allow(clippy::too_many_arguments)]
+fn horizon_map_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    azimuth: f64,
+    target_height: f64,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let opts = HorizonOptions { target_height, curvature, refraction, earth_radius };
+    let h = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::horizon_map(&grid, azimuth, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, h).reshape([rows, cols])?.into_any())
+}
+
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
@@ -300,6 +326,7 @@ fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cumulative_py, m)?)?;
     m.add_function(wrap_pyfunction!(visibility_index_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
+    m.add_function(wrap_pyfunction!(horizon_map_py, m)?)?;
     m.add_function(wrap_pyfunction!(intervisible_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_position_py, m)?)?;

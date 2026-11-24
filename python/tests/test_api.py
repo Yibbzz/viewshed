@@ -310,3 +310,38 @@ def test_cumulative_and_visibility_index():
         viewshed.cumulative(z, gt, [(3.5, 25.5), (99.0, 1.0)])
     with pytest.raises(ValueError, match="stride"):
         viewshed.visibility_index(z, gt, stride=0)
+
+
+def test_horizon_map_geometry_edges_and_shadow_consistency():
+    z = wall()                                                  # 5 m wall along row 15
+    h = viewshed.horizon_map(z, GT, azimuth=0.0, curvature=False)   # looking north
+    assert h.dtype == np.float64 and h.shape == z.shape
+    assert abs(h[20, 20] - 45.0) < 1e-9                         # 5 m up, 5 cells away
+    assert (np.abs(h[0, :]) < 1e-12).all()                      # top row: the half-cell rim, flat
+    assert abs(h[5, 20]) < 1e-12                                # beyond the wall: flat ahead
+    zt = z.copy()
+    zt[0, :] = np.nan                                           # only no-data ahead of row 1
+    assert (viewshed.horizon_map(zt, GT, 0.0)[1, :] == -90.0).all()
+    south = viewshed.horizon_map(z, GT, azimuth=180.0, curvature=False)
+    assert abs(south[10, 20] - 45.0) < 1e-9                     # the wall seen from the north
+    zn = z.copy()
+    zn[3, 3] = np.nan
+    assert np.isnan(viewshed.horizon_map(zn, GT, 0.0)[3, 3])
+    zc = np.zeros((41, 41))
+    curved = viewshed.horizon_map(zc, (0.0, 100.0, 0.0, 4100.0, 0.0, -100.0), 90.0)
+    assert (curved[:, :-1] == 0.0).all()                        # flat: the level limit beside the cell, curved or not
+    zc[20, 40] = 10.0                                           # a 10 m post 4 km east of (20, 0)
+    post = viewshed.horizon_map(zc, (0.0, 100.0, 0.0, 4100.0, 0.0, -100.0), 90.0)
+    drop = 4000.0 ** 2 * (1 - 0.13) / (2 * 6371008.8)           # the earth curves away
+    assert abs(post[20, 0] - np.degrees(np.arctan((10.0 - drop) / 4000.0))) < 1e-9
+    # shadow(az, el) is lit exactly when el is above the horizon (away from ties)
+    rng = np.random.default_rng(4)
+    zr = rng.normal(0, 2, (40, 40)).cumsum(0)
+    for az, el in [(135.0, 20.0), (250.0, 8.0), (10.0, 35.0)]:
+        hor = viewshed.horizon_map(zr, GT, az)
+        lit = viewshed.shadow(zr, GT, az, el)
+        clear = np.abs(hor - el) > 1e-6
+        assert (lit[clear] == (el > hor[clear])).all()
+        assert 0 < lit.sum() < lit.size
+    with pytest.raises(ValueError):
+        viewshed.horizon_map(z, GT, 0.0, target_height=-1.0)

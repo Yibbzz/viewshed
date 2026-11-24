@@ -15,6 +15,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Point-to-point line of sight**, exact, for many pairs at once (radio links; see [Line of sight between points](#line-of-sight-between-points)).
 - **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
+- **Horizon maps**: for every cell, the exact elevation angle of the skyline in a given direction (see [Horizon maps](#horizon-maps)).
 - **Sun hours**: hours of direct sun per cell over a day, a season or a year, from exact shadow maps and the sun's computed position (see [Sun hours](#sun-hours)).
 - **Earth curvature and refraction**, on by default, as in GRASS `r.viewshed -c -r`.
 
@@ -115,6 +116,19 @@ let lit = shadow(&grid, Sun { azimuth_deg: 135.0, elevation_deg: 30.0 }, &Shadow
 A cell is in shadow when its ray towards the sun passes strictly below the surface along a stretch of positive length; rays that leave the raster are lit, and no-data cells are `False` and never cast shadow. The result is exact for the sun's direction vector as computed from the two angles in floating point (cardinal azimuths are exact): at 45°, for example, the ray rises by `tan(45°)` = 0.9999999999999999 per unit, not 1, which can move a shadow's edge by a cell on terrain built to tie. Most cells are certified lit by a running maximum along strips in the sun's direction; the rest are decided on their own ray with rigorous rounding-error bounds, and true ties in exact rational arithmetic. Earth curvature and refraction work as for viewsheds (refraction above 1 is rejected).
 
 An exact shadow map takes about 0.5 s for 4 million cells (2,001 × 2,001 windows as above, 4 cores of an i5-8500T: 0.3–0.5 s with the sun 5–45° high). Approximate methods are faster or slower depending on the method, and differ from the exact map on a few percent of cells: a fast sampled sweep (Corripio 2003) is about 30–50 times faster and, on rough terrain at 2,001 × 2,001, differs on 0.5–1% of cells with the sun 15–30° high (missed shadow) and 1.5–2.5% at 5°; on 501 × 501 windows of rough terrain with the sun 5–30° high, GRASS `r.sunmask` differs on 1.6–4.9% of cells, mostly extra shadow within two cells of the shadow edge, and takes minutes.
+
+## Horizon maps
+
+`horizon_map` gives, for every cell, the elevation angle (degrees) of the highest terrain ahead in one direction: the input for sky view factor, terrain openness or a quick look at where the sun clears the skyline.
+
+```rust
+use viewshed::{horizon_map, HorizonOptions};
+let h = horizon_map(&grid, 135.0, &HorizonOptions::default()).unwrap();          // Vec<f64>, degrees
+```
+
+Same surface as `shadow`: heights at cell centres, bilinear between them, and the surface ends half a cell beyond the outer cell centres. Each value is the highest elevation angle of any point ahead on a stretch of positive length (no-data never counts), with earth curvature and refraction as for viewsheds. Cells with only no-data ahead get −90, no-data cells NaN. Negative horizons stay negative: GRASS `r.horizon` clamps at 0 (`np.maximum(h, 0)` to compare). A cell is shadowed by a sun at that azimuth exactly when the sun is below its horizon, so horizon maps and `shadow` agree.
+
+Exact to within 10⁻⁹ in the tangent of the angle (certified for every cell), up to the final arctangent. Strips along the direction hold a tree of upper convex hulls of patch corners (with each strip's sideways tilt taken out), so most of the terrain ahead is ruled out without being looked at; the rest is evaluated in closed form with rigorous error bounds, and the rare cells that can't be bounded tightly enough are settled with their stretches decided in exact rational arithmetic. Speed depends on the terrain: one direction over 1,001 × 1,001 cells takes about 1.5 s on mountains (Alps, 30 m) and rolling farmland (Iowa, 10 m), 3–5 s on flat plains (Kansas, 10 m) and under 1 s on a smooth tilted plane (4 cores). The slowest case we know of is artificial: a tilted plane with centimetre noise, about 13 s, where many distant patches come within a hair of the horizon and can't be ruled out early. GRASS `r.horizon` is faster, but on rough terrain in directions off the grid axes it is more than 0.5° off on 16–30% of cells (it samples along the ray), with 0.6–2.5% of cells flipping between lit and shadowed.
 
 ## Sun hours
 
