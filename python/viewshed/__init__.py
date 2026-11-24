@@ -17,6 +17,9 @@ averaged from the four cells meeting there), and a target is hidden when a
 closer cell's gradient, interpolated by angle in the target's direction, is
 steeper. `surface="bilinear"` is exact line of sight on the bilinear surface instead.
 
+`shadow` gives exact cast shadows on the same bilinear surface for a sun at a
+given azimuth and elevation.
+
 Earth curvature and refraction are on by default: every point is lowered by
 d^2 / (2 R) * (1 - refraction) at horizontal distance d, as in GRASS
 `r.viewshed -c -r` and GDAL's curvature coefficient.
@@ -29,7 +32,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.1.0"
-__all__ = ["viewshed", "ztv", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "ztv", "shadow", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -103,3 +106,25 @@ def ztv(dem, transform, targets, observer_height=2.0, max_distance=None, method=
     return _viewshed.ztv(_dem(dem), _transform(transform), tg, float(observer_height),
                          _distance(max_distance), str(method), bool(curvature),
                          float(refraction), float(earth_radius))
+
+
+def shadow(dem, transform, azimuth, elevation, target_height=0.0, curvature=True,
+           refraction=0.13, earth_radius=MEAN_EARTH_RADIUS):
+    """Which cells are lit by a sun at (azimuth, elevation)? A bool array shaped like `dem`.
+
+    azimuth: degrees clockwise from north (90 = east). elevation: degrees above the
+    horizon, strictly between 0 and 90.
+    target_height: height above each cell's surface that has to be lit.
+    curvature, refraction, earth_radius: as for `viewshed`; refraction above 1 with
+    curvature on is not supported.
+
+    Exact on the bilinear surface (heights at cell centres, bilinear between them): a
+    cell is shadowed when its ray towards the sun passes strictly below the surface
+    along a stretch of positive length. Exact for the direction vector computed from
+    the two angles (cardinal azimuths are exact). Rays leaving the raster are lit; no-data
+    cells are False and never cast shadow.
+    """
+    _heights(("target_height", target_height))
+    return _viewshed.shadow(_dem(dem), _transform(transform), float(azimuth), float(elevation),
+                            float(target_height), bool(curvature), float(refraction),
+                            float(earth_radius))

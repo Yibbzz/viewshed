@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use ::viewshed as vs;
-use vs::{Grid, Options, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
+use vs::{Grid, Options, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
 
 fn value_error(e: vs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -93,10 +93,38 @@ fn ztv_py<'py>(
     Ok(PyArray1::from_vec(py, counts).reshape([rows, cols])?.into_any())
 }
 
+/// Lit mask (bool, the DEM's shape) for a sun at (azimuth, elevation) degrees.
+#[pyfunction(name = "shadow")]
+#[allow(clippy::too_many_arguments)]
+fn shadow_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    azimuth: f64,
+    elevation: f64,
+    target_height: f64,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let sun = Sun { azimuth_deg: azimuth, elevation_deg: elevation };
+    let opts = ShadowOptions { target_height, curvature, refraction, earth_radius };
+    let lit = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::shadow(&grid, sun, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, lit).reshape([rows, cols])?.into_any())
+}
+
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(ztv_py, m)?)?;
+    m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
     m.add("MEAN_EARTH_RADIUS", vs::MEAN_EARTH_RADIUS)?;
     Ok(())
 }

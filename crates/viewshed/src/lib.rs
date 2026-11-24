@@ -42,6 +42,7 @@ pub use ztv::{ztv, ZtvMethod, ZtvOptions, ZtvTarget};
 
 /// Something went wrong before any visibility was computed.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Error {
     /// The height array length doesn't equal rows × cols.
     ShapeMismatch { len: usize, rows: usize, cols: usize },
@@ -55,8 +56,14 @@ pub enum Error {
     ObserverOnNoData,
     /// The area searched is over 1,000,000 cells across (set `max_distance`).
     TooLarge,
-    /// An argument outside its domain (e.g. a sun elevation outside (0, 90) degrees).
-    InvalidArgument(&'static str),
+    /// The sun's elevation isn't in (0, 90) degrees or its azimuth isn't finite (or, for a
+    /// direction vector, it has no horizontal part or points down).
+    InvalidSun,
+    /// A target height below zero (or NaN).
+    InvalidTargetHeight,
+    /// Refraction above 1 with curvature on (the earth would bulge upwards): not supported
+    /// for shadows.
+    UnsupportedRefraction,
 }
 
 impl fmt::Display for Error {
@@ -70,7 +77,9 @@ impl fmt::Display for Error {
             Error::ObserverOutside => write!(f, "the observer is outside the raster"),
             Error::ObserverOnNoData => write!(f, "there is no height data under the observer"),
             Error::TooLarge => write!(f, "the area searched is over 1,000,000 cells across; set max_distance"),
-            Error::InvalidArgument(m) => write!(f, "{m}"),
+            Error::InvalidSun => write!(f, "the sun's elevation must be in (0, 90) degrees and its azimuth finite"),
+            Error::InvalidTargetHeight => write!(f, "target_height must be >= 0"),
+            Error::UnsupportedRefraction => write!(f, "refraction above 1 (an earth bulging upwards) is not supported for shadows"),
         }
     }
 }

@@ -113,3 +113,35 @@ def test_runs_in_parallel_threads():
     for t in threads:
         t.join()
     assert all((r == expected).all() for r in results)
+
+
+def test_shadow_of_a_wall():
+    # flat ground, a 5 m wall in column 20, sun due east at 40 degrees (tan = 0.839): a cell
+    # c < 20 looks east along its row and its ray is 0.839 (20 - c) m up at the wall's top
+    # (5 m): shadowed for c in 15..19 (4.2 m at c = 15), lit at c = 14 (5.03 m) and beyond
+    # the wall. (At exactly 45 degrees c = 15 is shadowed too: tan(45 deg) is 0.9999999999999999
+    # in floats, and shadows are exact for the float sun vector.)
+    z = np.zeros((41, 41))
+    z[:, 20] = 5.0
+    lit = viewshed.shadow(z, GT, azimuth=90.0, elevation=40.0, curvature=False)
+    assert lit.dtype == bool and lit.shape == (41, 41)
+    row = lit[20]
+    assert not row[15:20].any()
+    assert row[:15].all() and row[20:].all()
+    # sun due west: the mirror image
+    lit_w = viewshed.shadow(z, GT, azimuth=270.0, elevation=40.0, curvature=False)
+    assert (lit_w[20, ::-1] == row).all()
+
+
+def test_shadow_no_data_and_errors():
+    z = np.zeros((11, 11))
+    z[5, 5] = np.nan
+    lit = viewshed.shadow(z, GT, 180.0, 30.0)
+    assert not lit[5, 5] and lit[0, 0]
+    for elevation in (0.0, 90.0, -5.0, float("nan")):
+        with pytest.raises(ValueError):
+            viewshed.shadow(z, GT, 180.0, elevation)
+    with pytest.raises(ValueError):
+        viewshed.shadow(z, GT, 180.0, 30.0, target_height=-1.0)
+    with pytest.raises(ValueError):
+        viewshed.shadow(z, GT, 180.0, 30.0, refraction=1.5)

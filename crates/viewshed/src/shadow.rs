@@ -58,7 +58,7 @@ impl Sun {
     /// step of one cell. Errors on elevation outside (0, 90) degrees.
     pub fn direction(&self, grid: &Grid) -> Result<[f64; 3], Error> {
         if !(self.elevation_deg > 0.0 && self.elevation_deg < 90.0) || !self.azimuth_deg.is_finite() {
-            return Err(Error::InvalidArgument("sun elevation must be in (0, 90) degrees"));
+            return Err(Error::InvalidSun);
         }
         // cardinal azimuths exactly (sin 180 deg is 1.2e-16 in floats: a ray a hair off the grid
         // line, while 0 deg is exactly on it); other angles through sin/cos. Exact for the
@@ -119,14 +119,14 @@ pub fn shadow(grid: &Grid, sun: Sun, opts: &ShadowOptions) -> Result<Vec<bool>, 
 pub fn shadow_vec(grid: &Grid, v: [f64; 3], opts: &ShadowOptions) -> Result<Vec<bool>, Error> {
     let [dx, dy, dz] = v;
     if !(dx.is_finite() && dy.is_finite() && dz.is_finite()) || (dx == 0.0 && dy == 0.0) || dz < 0.0 {
-        return Err(Error::InvalidArgument("the sun direction needs a horizontal part and dz >= 0"));
+        return Err(Error::InvalidSun);
     }
     if opts.target_height.is_nan() || opts.target_height < 0.0 {
-        return Err(Error::InvalidArgument("target_height must be >= 0"));
+        return Err(Error::InvalidTargetHeight);
     }
     let k = opts.drop_factor();
     if k < 0.0 {
-        return Err(Error::InvalidArgument("refraction above 1 (a rising earth) is not supported for shadows"));
+        return Err(Error::UnsupportedRefraction);
     }
     let s = Setup::new(grid, dx, dy, dz, k, opts.target_height);
     Ok(s.run())
