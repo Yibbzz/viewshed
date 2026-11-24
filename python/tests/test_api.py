@@ -286,3 +286,27 @@ def test_intervisible_shapes_broadcasting_and_errors():
         viewshed.intervisible(z, GT, mast, (1.5, 1.5, -1.0))
     with pytest.raises(ValueError, match="3 points and b has 2"):
         viewshed.intervisible(z, GT, many, many[:2])
+
+
+def test_cumulative_and_visibility_index():
+    rng = np.random.default_rng(9)
+    z = rng.normal(0, 2, (30, 30)).cumsum(0)
+    z[4, 4] = np.nan
+    gt = (0.0, 1.0, 0.0, 30.0, 0.0, -1.0)
+    obs = [(3.5, 25.5), (20.2, 10.7, 6.0), (29.0, 1.0)]
+    for surface in ("rviewshed", "bilinear"):
+        kw = dict(target_height=0.5, max_distance=25.0, surface=surface)
+        counts = viewshed.cumulative(z, gt, obs, observer_height=2.0, **kw)
+        assert counts.dtype == np.uint32 and counts.shape == z.shape and counts[4, 4] == 0
+        want = sum(viewshed.viewshed(z, gt, p[:2], observer_height=(p[2] if len(p) == 3 else 2.0),
+                                     **kw).astype(np.uint32) for p in obs)
+        assert (counts == want).all()
+        vi = viewshed.visibility_index(z, gt, stride=7, observer_height=2.0, **kw)
+        sample = [(c + 0.5, 30 - r - 0.5) for r in range(0, 30, 7) for c in range(0, 30, 7)]
+        ref = viewshed.cumulative(z, gt, sample, observer_height=2.0, **kw) / len(sample)
+        assert np.isnan(vi[4, 4]) and np.allclose(vi[~np.isnan(z)], ref[~np.isnan(z)], rtol=0, atol=0)
+        assert 0 <= vi[~np.isnan(z)].min() and 0 < vi[~np.isnan(z)].max() <= 1
+    with pytest.raises(ValueError, match="observer 1: the observer is outside"):
+        viewshed.cumulative(z, gt, [(3.5, 25.5), (99.0, 1.0)])
+    with pytest.raises(ValueError, match="stride"):
+        viewshed.visibility_index(z, gt, stride=0)

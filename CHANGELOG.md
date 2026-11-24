@@ -5,6 +5,7 @@ All notable changes to `viewshed` (the Rust crate and the Python package, which 
 ## Unreleased
 
 ### Added
+- **Cumulative viewsheds and a visibility index.** `viewshed.cumulative(dem, transform, observers, ...)` (per cell, how many observers see it; per-observer eye heights) and `viewshed.visibility_index(dem, transform, stride, ...)` (per cell, the fraction of observers on every `stride`-th cell that see it) in Python; `viewshed::cumulative` and `viewshed::visibility_index` in Rust. Exactly the sum of one viewshed per observer, either surface, in parallel. `Error::Observer { index, error }` names a bad observer; `Error::InvalidStride`.
 - **Exact point-to-point line of sight.** `viewshed.intervisible(dem, transform, a, b, ...)` in Python (one pair, or arrays of points, one-to-many broadcast), `viewshed::intervisible(grid, &[(Point, Point)], &LosOptions)` in Rust. Exact on the bilinear surface for endpoints anywhere, with curvature; order-independent; equal to the bilinear viewshed for cell-centre targets. Checked against a new exact oracle (`oracle.line_of_sight`) on tie-heavy rasters with endpoints on cell centres, cell corners and grid lines. About 50 µs per link (2,001 × 2,001, links up to 6 km, 4 cores).
 - `Error::PointOutside`, `PointOnNoData` and `InvalidPointHeight`, each naming the pair.
 

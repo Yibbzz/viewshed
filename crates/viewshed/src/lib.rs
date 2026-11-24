@@ -32,12 +32,14 @@ use std::fmt;
 
 mod bilinear;
 mod los;
+mod multi;
 mod shadow;
 mod sunpos;
 mod sweep;
 mod ztv;
 
 pub use los::{intervisible, LosOptions, Point};
+pub use multi::{cumulative, visibility_index};
 pub use shadow::{shadow, ShadowOptions, Sun};
 #[doc(hidden)]
 pub use shadow::shadow_vec;
@@ -80,6 +82,10 @@ pub enum Error {
     PointOnNoData { pair: usize },
     /// A point of pair `pair` has a height below zero (or not finite).
     InvalidPointHeight { pair: usize },
+    /// Observer `index` of a list failed (the inner error says why).
+    Observer { index: usize, error: Box<Error> },
+    /// A visibility-index stride of 0.
+    InvalidStride,
 }
 
 impl fmt::Display for Error {
@@ -102,6 +108,8 @@ impl fmt::Display for Error {
             Error::PointOutside { pair } => write!(f, "pair {pair}: a point is outside the raster"),
             Error::PointOnNoData { pair } => write!(f, "pair {pair}: there is no height data under a point"),
             Error::InvalidPointHeight { pair } => write!(f, "pair {pair}: heights must be finite and >= 0"),
+            Error::Observer { index, error } => write!(f, "observer {index}: {error}"),
+            Error::InvalidStride => write!(f, "stride must be at least 1"),
         }
     }
 }

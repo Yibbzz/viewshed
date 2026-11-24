@@ -20,6 +20,9 @@ steeper. `surface="bilinear"` is exact line of sight on the bilinear surface ins
 `intervisible` answers exactly, for many pairs of points at once, whether each
 pair can see each other (radio links).
 
+`cumulative` counts, for every cell, how many of a list of observers see it, and
+`visibility_index` how visible each cell is from observers spread over the raster.
+
 `reverse_viewshed` turns the question round: from which cells can a target
 (a mast top, a roof) be seen?
 
@@ -43,7 +46,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.3.0"
-__all__ = ["viewshed", "reverse_viewshed", "intervisible", "ztv", "shadow", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "intervisible", "cumulative", "visibility_index", "ztv", "shadow", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -157,6 +160,58 @@ def intervisible(dem, transform, a, b, curvature=True, refraction=0.13,
     seen = _viewshed.intervisible(_dem(dem), _transform(transform), pairs, bool(curvature),
                                   float(refraction), float(earth_radius))
     return bool(seen[0]) if single else seen
+
+
+def cumulative(dem, transform, observers, observer_height=1.6, target_height=0.0,
+               max_distance=None, curvature=True, refraction=0.13,
+               earth_radius=MEAN_EARTH_RADIUS, surface="rviewshed"):
+    """For every cell, how many of `observers` can see it. A uint32 array shaped like `dem`.
+
+    observers: (x, y) or (x, y, eye height above the surface) each, e.g. points along a
+        walking route or a set of viewpoints; (x, y) points use `observer_height`.
+    target_height, max_distance, curvature, refraction, earth_radius, surface: as for
+        `viewshed`.
+
+    Exactly the sum of one `viewshed` per observer (so exact in the same sense), spread
+    over all cores. No-data cells are 0. A bad observer raises ValueError naming its index.
+    """
+    _heights(("observer_height", observer_height), ("target_height", target_height))
+    obs = []
+    for i, p in enumerate(observers):
+        p = [float(v) for v in p]
+        if len(p) == 2:
+            p.append(float(observer_height))
+        if len(p) != 3:
+            raise ValueError(f"observer {i}: expected (x, y) or (x, y, height)")
+        if not (p[2] >= 0):
+            raise ValueError(f"observer {i}: height must be >= 0")
+        obs.append(tuple(p))
+    return _viewshed.cumulative(_dem(dem), _transform(transform), obs, float(target_height),
+                                _distance(max_distance), bool(curvature), float(refraction),
+                                float(earth_radius), str(surface))
+
+
+def visibility_index(dem, transform, stride=10, observer_height=1.6, target_height=0.0,
+                     max_distance=None, curvature=True, refraction=0.13,
+                     earth_radius=MEAN_EARTH_RADIUS, surface="rviewshed"):
+    """How visible is each cell from the landscape around it? A float64 array shaped like
+    `dem`: the fraction (0 to 1) of sample observers that can see the cell; NaN on no-data.
+
+    The sample observers stand on every `stride`-th cell with data (rows and columns 0,
+    stride, 2 stride, ...), `observer_height` above the surface. stride=1 makes every cell
+    an observer (the "total viewshed"). The cost is one viewshed per observer, so on large
+    rasters use a stride and a `max_distance` (cells beyond it count as not seen, so values
+    near the raster's edge are lower).
+    Other arguments as for `viewshed`. Exact: the sum of exact viewsheds.
+    """
+    _heights(("observer_height", observer_height), ("target_height", target_height))
+    if int(stride) < 1:
+        raise ValueError("stride must be at least 1")
+    frac, _ = _viewshed.visibility_index(_dem(dem), _transform(transform), int(stride),
+                                         float(observer_height), float(target_height),
+                                         _distance(max_distance), bool(curvature),
+                                         float(refraction), float(earth_radius), str(surface))
+    return frac
 
 
 def ztv(dem, transform, targets, observer_height=2.0, max_distance=None, method="forward",

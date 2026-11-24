@@ -2,7 +2,7 @@
 
 **Fast, exact line-of-sight viewsheds** for Python and Rust.
 
-Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly hid 1–5% of visible ground in our tests. The exact ones are slow to call or hard to install. `viewshed` aims to be both exact and fast: a Rust core, NumPy in and out, `pip install` on any platform with no GDAL, GRASS or compiler, and support for many observers (wind-turbine ZTV today; cumulative viewsheds and a visibility index are in progress).
+Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly hid 1–5% of visible ground in our tests. The exact ones are slow to call or hard to install. `viewshed` aims to be both exact and fast: a Rust core, NumPy in and out, `pip install` on any platform with no GDAL, GRASS or compiler, and first-class support for many observers (cumulative viewsheds, visibility index, wind-turbine ZTV).
 
 ## Status
 
@@ -11,6 +11,7 @@ Most fast viewshed tools approximate line of sight; GDAL's, for example, wrongly
 - **Exact, and checked.** The default surface model is GRASS `r.viewshed`'s, and results match GRASS 8.4 on every cell, with and without earth curvature and refraction. Two independent checkers back this up: an exact bilinear line-of-sight oracle (closed form, float decisions certified by rigorous rounding-error bounds, ties in rational arithmetic), and an r.viewshed-model oracle written from the method's description. The `"bilinear"` surface is exact line of sight on the bilinear surface and matches that oracle on every cell (see [Bilinear surface](#bilinear-surface)). Accuracy against real geometry is measured on analytic scenes and continuous surfaces.
 - **Fast.** A radial sweep in Rust on all cores: a 1,000-cell radius (4 million cells) takes about 1 s and 100 MB on a 4-core laptop, against 8–9 s for `r.viewshed`.
 - **Wind-farm ZTV.** Counts how many turbine tips every cell can see, either by the definition (every cell an observer) or by the usual reciprocal shortcut (one viewshed per tip, about 5× faster and within a few hundredths of a percent of the definition). On an 8 km square at 10 m with 8 turbines, the definition takes about 7 s on a 4-core laptop.
+- **Many observers**: cumulative viewsheds and a visibility index, exact (see [Many observers](#many-observers)).
 - **Point-to-point line of sight**, exact, for many pairs at once (radio links; see [Line of sight between points](#line-of-sight-between-points)).
 - **Reverse viewshed**: from which cells a target (a mast, a roof) can be seen, exact for every cell (see [Reverse viewshed](#reverse-viewshed)).
 - **Exact shadow maps**: every cell lit or in shadow for a given sun position, on the bilinear surface (see [Shadow maps](#shadow-maps)).
@@ -74,6 +75,18 @@ Speed on 2,001 × 2,001 windows of real terrain (wall time, best of three, 4 cor
 | Wellington | highest point | 48% | 0.85 s | 0.65 s |
 
 The exact bilinear result is faster than this library's approximate r.viewshed-model sweep (same runs) on the Alps and Iowa windows, about level on the Wellington centre, and 1.3–1.8× slower where much of the terrain is visible (Kansas, the Wellington high point).
+
+## Many observers
+
+`cumulative` counts, for every cell, how many of a list of observers can see it (points along a walking route, a set of viewpoints, masts of different heights); `visibility_index` puts an observer on every n-th cell and gives each cell the fraction of them that can see it, a map of how exposed each place is.
+
+```python
+route = [(x1, y1), (x2, y2), (x3, y3, 10.0)]                  # (x, y) or (x, y, eye height)
+counts = viewshed.cumulative(dem, transform, route, observer_height=1.6)          # uint32 array
+vi = viewshed.visibility_index(dem, transform, stride=20, max_distance=3000.0)    # 0..1 per cell
+```
+
+Both are exactly the sum of one viewshed per observer, on either surface model, spread over all cores, so they are exact in the same sense as `viewshed`, and the cost is one viewshed per observer. On 1,001 × 1,001 cells at 10 m with a 3 km range (4 cores, on a busy machine), 100 observers take about 10 s with the default surface and 23 s with `"bilinear"`; a visibility index with an observer on every 20th cell (2,500 observers) about 4 minutes with the default surface. Cells beyond `max_distance` of an observer count as not seen by it, so the index is lower near the raster's edge.
 
 ## Line of sight between points
 

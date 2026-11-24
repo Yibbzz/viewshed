@@ -235,11 +235,70 @@ fn intervisible_py<'py>(
     Ok(PyArray1::from_vec(py, seen).into_any())
 }
 
+/// How many of the observers (x, y, eye height) see each cell (uint32, the DEM's shape).
+#[pyfunction(name = "cumulative")]
+#[allow(clippy::too_many_arguments)]
+fn cumulative_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    observers: Vec<(f64, f64, f64)>,
+    target_height: f64,
+    max_distance: Option<f64>,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+    surface_name: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let obs: Vec<Point> = observers.into_iter().map(|(x, y, height)| Point { x, y, height }).collect();
+    let opts = Options { target_height, max_distance, surface: surface(surface_name)?, curvature, refraction, earth_radius, ..Options::default() };
+    let counts = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::cumulative(&grid, &obs, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, counts).reshape([rows, cols])?.into_any())
+}
+
+/// Fraction of the every-stride-th-cell observers that see each cell (float64; NaN on no-data),
+/// and the number of observers.
+#[pyfunction(name = "visibility_index")]
+#[allow(clippy::too_many_arguments)]
+fn visibility_index_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    stride: usize,
+    observer_height: f64,
+    target_height: f64,
+    max_distance: Option<f64>,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+    surface_name: &str,
+) -> PyResult<(Bound<'py, PyAny>, usize)> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let opts = Options { observer_height, target_height, max_distance, surface: surface(surface_name)?, curvature, refraction, earth_radius };
+    let (frac, k) = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::visibility_index(&grid, stride, &opts)
+        })
+        .map_err(value_error)?;
+    Ok((PyArray1::from_vec(py, frac).reshape([rows, cols])?.into_any(), k))
+}
+
 #[pymodule]
 fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(reverse_viewshed_py, m)?)?;
     m.add_function(wrap_pyfunction!(ztv_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cumulative_py, m)?)?;
+    m.add_function(wrap_pyfunction!(visibility_index_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
     m.add_function(wrap_pyfunction!(intervisible_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
