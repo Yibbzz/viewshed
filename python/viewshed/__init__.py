@@ -47,7 +47,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.4.0"
-__all__ = ["viewshed", "reverse_viewshed", "intervisible", "cumulative", "visibility_index", "ztv", "shadow", "horizon_map", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "intervisible", "fresnel_clearance", "cumulative", "visibility_index", "ztv", "shadow", "horizon_map", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -130,6 +130,24 @@ def reverse_viewshed(dem, transform, target, target_height=0.0, observer_height=
         raise ValueError(msg) from None
 
 
+def _pairs(a, b):
+    """Point pairs from a, b: one point (x, y, height) each, or arrays of shape (n, 3), with a
+    single point broadcast against many. Returns (list of pairs, whether both were single)."""
+    pa, pb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    single = pa.ndim == 1 and pb.ndim == 1
+    pa, pb = np.atleast_2d(pa), np.atleast_2d(pb)
+    if pa.shape[1:] != (3,) or pb.shape[1:] != (3,):
+        raise ValueError("points must be (x, y, height) or arrays of shape (n, 3)")
+    if len(pa) != len(pb):
+        if len(pa) == 1:
+            pa = np.repeat(pa, len(pb), axis=0)
+        elif len(pb) == 1:
+            pb = np.repeat(pb, len(pa), axis=0)
+        else:
+            raise ValueError(f"a has {len(pa)} points and b has {len(pb)}")
+    return [(tuple(p), tuple(q)) for p, q in zip(pa.tolist(), pb.tolist())], single
+
+
 def intervisible(dem, transform, a, b, curvature=True, refraction=0.13,
                  earth_radius=MEAN_EARTH_RADIUS):
     """Can each point in `a` see the matching point in `b`? Exact line of sight.
@@ -145,22 +163,38 @@ def intervisible(dem, transform, a, b, curvature=True, refraction=0.13,
     in parallel; a point outside the raster or over no-data raises ValueError naming its
     pair.
     """
-    pa, pb = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
-    single = pa.ndim == 1 and pb.ndim == 1
-    pa, pb = np.atleast_2d(pa), np.atleast_2d(pb)
-    if pa.shape[1:] != (3,) or pb.shape[1:] != (3,):
-        raise ValueError("points must be (x, y, height) or arrays of shape (n, 3)")
-    if len(pa) != len(pb):
-        if len(pa) == 1:
-            pa = np.repeat(pa, len(pb), axis=0)
-        elif len(pb) == 1:
-            pb = np.repeat(pb, len(pa), axis=0)
-        else:
-            raise ValueError(f"a has {len(pa)} points and b has {len(pb)}")
-    pairs = [(tuple(p), tuple(q)) for p, q in zip(pa.tolist(), pb.tolist())]
+    pairs, single = _pairs(a, b)
     seen = _viewshed.intervisible(_dem(dem), _transform(transform), pairs, bool(curvature),
                                   float(refraction), float(earth_radius))
     return bool(seen[0]) if single else seen
+
+
+def fresnel_clearance(dem, transform, a, b, frequency, curvature=True, refraction=0.13,
+                      earth_radius=MEAN_EARTH_RADIUS, return_position=False):
+    """Fresnel clearance of radio links: the worst fraction of the first Fresnel zone left clear.
+
+    a, b: link ends (x, y, height above the surface), one point or arrays of shape (n, 3)
+        each, as for `intervisible`. Heights must be > 0. Map units must be metres.
+    frequency: in Hz (e.g. 2.4e9).
+    curvature, refraction, earth_radius: as for `viewshed`. The default refraction 0.13 is
+        for light; radio planning usually takes k = 4/3, which is refraction=0.25
+        (k = 1 / (1 - refraction)).
+    return_position: also return t, where along the link (0 at a, 1 at b) the worst point is.
+
+    Returns the ratio (a float, or an array of length n): the smallest value along the
+    link of (gap below the sightline) / (first Fresnel zone radius), with the zone radius
+    sqrt(lambda d1 d2 / D). 1 = the first zone is clear, 0.6 the usual planning target,
+    0 grazing, below 0 the line itself is blocked; inf if there is no data under the link.
+    The ITU-R P.526 diffraction parameter of the worst point is nu = -sqrt(2) * ratio.
+
+    Exact on the bilinear surface (as `intervisible`), certified to within 1e-9 + 1e-12 |ratio|.
+    """
+    pairs, single = _pairs(a, b)
+    ratio, t = _viewshed.fresnel_clearance(_dem(dem), _transform(transform), pairs, float(frequency),
+                                           bool(curvature), float(refraction), float(earth_radius))
+    if single:
+        ratio, t = float(ratio[0]), float(t[0])
+    return (ratio, t) if return_position else ratio
 
 
 def cumulative(dem, transform, observers, observer_height=1.6, target_height=0.0,

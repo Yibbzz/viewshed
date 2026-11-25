@@ -31,6 +31,7 @@
 use std::fmt;
 
 mod bilinear;
+mod fresnel;
 mod horizon;
 mod los;
 mod multi;
@@ -39,6 +40,9 @@ mod sunpos;
 mod sweep;
 mod ztv;
 
+pub use fresnel::{fresnel_clearance, Clearance, SPEED_OF_LIGHT};
+#[doc(hidden)]
+pub use fresnel::fresnel_stats;
 pub use horizon::{horizon_map, HorizonOptions};
 #[doc(hidden)]
 pub use horizon::horizon_rise_vec;
@@ -86,6 +90,12 @@ pub enum Error {
     PointOnNoData { pair: usize },
     /// A point of pair `pair` has a height below zero (or not finite).
     InvalidPointHeight { pair: usize },
+    /// Fresnel clearance: the frequency must be finite and > 0.
+    InvalidFrequency,
+    /// Fresnel clearance of pair `pair`: both heights must be > 0 (the zone's radius is 0 at an end).
+    ZeroPointHeight { pair: usize },
+    /// Pair `pair`'s two points coincide.
+    CoincidentPoints { pair: usize },
     /// Observer `index` of a list failed (the inner error says why).
     Observer { index: usize, error: Box<Error> },
     /// A visibility-index stride of 0.
@@ -112,6 +122,9 @@ impl fmt::Display for Error {
             Error::PointOutside { pair } => write!(f, "pair {pair}: a point is outside the raster"),
             Error::PointOnNoData { pair } => write!(f, "pair {pair}: there is no height data under a point"),
             Error::InvalidPointHeight { pair } => write!(f, "pair {pair}: heights must be finite and >= 0"),
+            Error::InvalidFrequency => write!(f, "frequency must be finite and > 0"),
+            Error::ZeroPointHeight { pair } => write!(f, "pair {pair}: heights must be > 0 for Fresnel clearance"),
+            Error::CoincidentPoints { pair } => write!(f, "pair {pair}: the two points coincide"),
             Error::Observer { index, error } => write!(f, "observer {index}: {error}"),
             Error::InvalidStride => write!(f, "stride must be at least 1"),
         }

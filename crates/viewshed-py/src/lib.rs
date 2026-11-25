@@ -235,6 +235,37 @@ fn intervisible_py<'py>(
     Ok(PyArray1::from_vec(py, seen).into_any())
 }
 
+/// Fresnel clearance of point pairs: (worst ratio, t of the worst point) arrays.
+#[pyfunction(name = "fresnel_clearance")]
+#[allow(clippy::too_many_arguments)]
+fn fresnel_clearance_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    pairs: Vec<PyPair>,
+    frequency: f64,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let pts: Vec<(Point, Point)> = pairs
+        .into_iter()
+        .map(|((ax, ay, ah), (bx, by, bh))| (Point { x: ax, y: ay, height: ah }, Point { x: bx, y: by, height: bh }))
+        .collect();
+    let opts = LosOptions { curvature, refraction, earth_radius };
+    let out = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::fresnel_clearance(&grid, &pts, frequency, &opts)
+        })
+        .map_err(value_error)?;
+    let ratio: Vec<f64> = out.iter().map(|c| c.ratio).collect();
+    let t: Vec<f64> = out.iter().map(|c| c.t).collect();
+    Ok((PyArray1::from_vec(py, ratio).into_any(), PyArray1::from_vec(py, t).into_any()))
+}
+
 /// How many of the observers (x, y, eye height) see each cell (uint32, the DEM's shape).
 #[pyfunction(name = "cumulative")]
 #[allow(clippy::too_many_arguments)]
@@ -328,6 +359,7 @@ fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
     m.add_function(wrap_pyfunction!(horizon_map_py, m)?)?;
     m.add_function(wrap_pyfunction!(intervisible_py, m)?)?;
+    m.add_function(wrap_pyfunction!(fresnel_clearance_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_position_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_samples_py, m)?)?;

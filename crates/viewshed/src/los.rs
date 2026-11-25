@@ -49,7 +49,7 @@ impl Default for LosOptions {
 }
 
 impl LosOptions {
-    fn drop_factor(&self) -> f64 {
+    pub(crate) fn drop_factor(&self) -> f64 {
         if self.curvature {
             (1.0 - self.refraction) / (2.0 * self.earth_radius)
         } else {
@@ -76,13 +76,13 @@ pub fn intervisible(grid: &Grid, pairs: &[(Point, Point)], opts: &LosOptions) ->
 
 /// One end, exact: grid coordinates (u = column, v = row, cell centres at integers) and
 /// the eye height (ground + height).
-struct End {
-    u: BigRational,
-    v: BigRational,
-    z: BigRational,
+pub(crate) struct End {
+    pub(crate) u: BigRational,
+    pub(crate) v: BigRational,
+    pub(crate) z: BigRational,
 }
 
-fn end(grid: &Grid, p: &Point, pair: usize) -> Result<End, Error> {
+pub(crate) fn end(grid: &Grid, p: &Point, pair: usize) -> Result<End, Error> {
     if !(p.height >= 0.0 && p.height.is_finite()) {
         return Err(Error::InvalidPointHeight { pair });
     }
@@ -106,7 +106,7 @@ fn end(grid: &Grid, p: &Point, pair: usize) -> Result<End, Error> {
 /// One end in floats (u, v, eye height), with the same validity checks as [`end`]: decided
 /// in floats when the point is clearly inside one patch (more than 1e-6 cells from its
 /// edges and from the raster's border, far beyond the floats' error), else exactly.
-fn end_f(grid: &Grid, p: &Point, pair: usize) -> Result<(f64, f64, f64), Error> {
+pub(crate) fn end_f(grid: &Grid, p: &Point, pair: usize) -> Result<(f64, f64, f64), Error> {
     const D: f64 = 1e-6;
     if !(p.height >= 0.0 && p.height.is_finite()) {
         return Err(Error::InvalidPointHeight { pair });
