@@ -35,6 +35,7 @@ mod horizon;
 mod los;
 mod multi;
 mod shadow;
+mod sky;
 mod sunpos;
 mod sweep;
 mod ztv;
@@ -45,6 +46,7 @@ pub use horizon::horizon_rise_vec;
 pub use los::{intervisible, LosOptions, Point};
 pub use multi::{cumulative, visibility_index};
 pub use shadow::{shadow, ShadowOptions, Sun};
+pub use sky::{openness, sky_view_factor, Openness, OpennessOptions, SkyOptions, SkyViewFactor};
 #[doc(hidden)]
 pub use shadow::shadow_vec;
 pub use sunpos::{sun_hours, sun_hours_between, sun_position, sun_samples, SunPosition};
@@ -90,6 +92,8 @@ pub enum Error {
     Observer { index: usize, error: Box<Error> },
     /// A visibility-index stride of 0.
     InvalidStride,
+    /// A sky view factor or openness with 0 directions.
+    InvalidAzimuthCount,
 }
 
 impl fmt::Display for Error {
@@ -114,6 +118,7 @@ impl fmt::Display for Error {
             Error::InvalidPointHeight { pair } => write!(f, "pair {pair}: heights must be finite and >= 0"),
             Error::Observer { index, error } => write!(f, "observer {index}: {error}"),
             Error::InvalidStride => write!(f, "stride must be at least 1"),
+            Error::InvalidAzimuthCount => write!(f, "the number of directions must be at least 1"),
         }
     }
 }
