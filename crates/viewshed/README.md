@@ -130,6 +130,21 @@ Same surface as `shadow`: heights at cell centres, bilinear between them, and th
 
 Exact to within 10⁻⁹ in the tangent of the angle (certified for every cell), up to the final arctangent. Strips along the direction hold a tree of upper convex hulls of patch corners (with each strip's sideways tilt taken out), so most of the terrain ahead is ruled out without being looked at; the rest is evaluated in closed form with rigorous error bounds, and the rare cells that can't be bounded tightly enough are settled with their stretches decided in exact rational arithmetic. Speed depends on the terrain: one direction over 1,001 × 1,001 cells takes about 1.5 s on mountains (Alps, 30 m) and rolling farmland (Iowa, 10 m), 3–5 s on flat plains (Kansas, 10 m) and under 1 s on a smooth tilted plane (4 cores). The slowest case we know of is artificial: a tilted plane with centimetre noise, about 13 s, where many distant patches come within a hair of the horizon and can't be ruled out early. GRASS `r.horizon` agrees in grid-aligned directions, but in directions off the grid axes on rough terrain it is more than 0.5° off on 9–30% of cells (it samples along the ray), with 0.5–3.7% of cells flipping between lit and shadowed. It is also slower in wall time (3.5–8.8 s single-threaded against 0.8–2.0 s on 4 cores, 1,001 × 1,001, one direction), and about as fast per core. To compare, put the raster on its zone's central meridian or rotate the azimuth: `r.horizon` turns its directions to true north by the projection's grid convergence, while `horizon_map` uses grid north.
 
+## Sky view factor and openness
+
+`sky_view_factor` and `openness` aggregate exact horizon maps over several directions. The horizons are exact on the bilinear surface; only the number of azimuths is a sampling approximation.
+
+```rust
+use viewshed::{openness, sky_view_factor, Openness, OpennessOptions, SkyOptions, SkyViewFactor};
+let svf = sky_view_factor(&grid, SkyViewFactor::VisibleSky, &SkyOptions::default()).unwrap();
+let iso = sky_view_factor(&grid, SkyViewFactor::Isotropic, &SkyOptions::default()).unwrap();
+let open = openness(&grid, Openness::Positive, &OpennessOptions::default()).unwrap();
+```
+
+The visible-sky factor (Zakšek et al. 2011) is `1 - mean(sin(max(H, 0)))` over the horizon elevations `H`. The isotropic factor is the diffuse sky view factor of Dozier & Frew (1990) for the local sloped surface. Positive openness is the mean of `90° - H` (Yokoyama et al. 2002); negative openness measures the terrain below the surface. The directions are evenly spaced clockwise from grid north, 32 by default. `max_distance` limits the terrain that counts.
+
+At 32 directions, the azimuth-sampling error is about 5e-4 on rough mountains and 4e-5 on plains in our test windows. Exact horizons also remove the along-ray error of sampled tools: in the same study RVT's visible-sky factor was low by 0.0007–0.0094 and topocalc's by up to 0.01, mostly because those tools sample off the true ray. Computing 32 exact horizons is relatively costly (about 35 s for a 501 × 501 rough raster on 4 cores); fewer directions are faster.
+
 ## Sun hours
 
 `sun_hours_between` adds up exact shadow maps over a time range: hours of direct sun per cell (`f64`, NaN on no-data). `sun_position` gives the sun's azimuth and elevation at a place and time; `sun_samples` and `sun_hours` take the sampling, or any weighted set of sun positions, into your own hands.

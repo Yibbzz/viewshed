@@ -6,6 +6,8 @@
 //! grid north (0°, 360°/K, ...). With K = 32 the mean azimuth-sampling error of the sky view factor
 //! is about 5e-4 on rough mountains and 4e-5 on plains (research note svf-2026-11-24.md).
 
+use rayon::prelude::*;
+
 use crate::horizon::{horizon_rise_vec, HorizonOptions};
 use crate::shadow::azimuth_vector;
 use crate::{Error, Grid, MEAN_EARTH_RADIUS};
@@ -80,32 +82,38 @@ impl Default for OpennessOptions {
 }
 
 /// The K azimuths, degrees clockwise from grid north: 360 k / K.
-fn azimuths(k: usize) -> impl Iterator<Item = f64> {
-    (0..k).map(move |i| 360.0 * i as f64 / k as f64)
+fn azimuths(k: usize) -> Vec<f64> {
+    (0..k).map(|i| 360.0 * i as f64 / k as f64).collect()
 }
 
 /// For each direction: (azimuth, per cell the horizon as (sin e, cos e), e the elevation angle; the
 /// "nothing ahead" value is (-1, 0)). The tangent is rise / scale, scale = |v| res.
-fn horizons<'a>(grid: &'a Grid<'a>, k: usize, opts: &'a HorizonOptions) -> impl Iterator<Item = Result<(f64, Vec<(f64, f64)>), Error>> + 'a {
-    azimuths(k).map(move |az| {
-        let v = azimuth_vector(grid, az)?;
-        let rise = horizon_rise_vec(grid, v, opts)?;
-        let scale = (v[0] * v[0] + v[1] * v[1]).sqrt() * grid.res();
-        let sc = rise
-            .into_iter()
-            .map(|h| {
-                if h.is_nan() {
-                    (f64::NAN, f64::NAN)
-                } else if h == f64::NEG_INFINITY {
-                    (-1.0, 0.0)
-                } else {
-                    let d = h.hypot(scale);
-                    (h / d, scale / d)
-                }
-            })
-            .collect();
-        Ok((az, sc))
-    })
+fn horizons(grid: &Grid, k: usize, opts: &HorizonOptions) -> Result<Vec<(f64, Vec<(f64, f64)>)>, Error> {
+    // The directions are independent. Computing them in parallel is much faster than
+    // computing 32 exact horizon maps one after another; Rayon handles the nested
+    // parallelism inside each horizon map as well.
+    azimuths(k)
+        .into_par_iter()
+        .map(|az| {
+            let v = azimuth_vector(grid, az)?;
+            let rise = horizon_rise_vec(grid, v, opts)?;
+            let scale = (v[0] * v[0] + v[1] * v[1]).sqrt() * grid.res();
+            let sc = rise
+                .into_iter()
+                .map(|h| {
+                    if h.is_nan() {
+                        (f64::NAN, f64::NAN)
+                    } else if h == f64::NEG_INFINITY {
+                        (-1.0, 0.0)
+                    } else {
+                        let d = h.hypot(scale);
+                        (h / d, scale / d)
+                    }
+                })
+                .collect();
+            Ok((az, sc))
+        })
+        .collect::<Result<Vec<_>, Error>>()
 }
 
 /// Sky view factor per cell (0..1; NaN on no-data). See [`SkyViewFactor`] for the definitions.
@@ -123,8 +131,8 @@ pub fn sky_view_factor(grid: &Grid, kind: SkyViewFactor, opts: &SkyOptions) -> R
     let n = grid.z.len();
     let grad = if kind == SkyViewFactor::Isotropic { gradient(grid) } else { Vec::new() };
     let mut acc = vec![0.0f64; n];
-    for dir in horizons(grid, opts.azimuths, &hopts) {
-        let (az, sc) = dir?;
+    for dir in horizons(grid, opts.azimuths, &hopts)? {
+        let (az, sc) = dir;
         let (ue, un) = (az.to_radians().sin(), az.to_radians().cos());
         for i in 0..n {
             let (se, ce) = sc[i];
@@ -183,8 +191,8 @@ pub fn openness(grid: &Grid, kind: Openness, opts: &OpennessOptions) -> Result<V
     };
     let n = grid.z.len();
     let mut acc = vec![0.0f64; n];
-    for dir in horizons(g, opts.azimuths, &hopts) {
-        let (_, sc) = dir?;
+    for dir in horizons(g, opts.azimuths, &hopts)? {
+        let (_, sc) = dir;
         for i in 0..n {
             let (se, ce) = sc[i];
             if !se.is_nan() {

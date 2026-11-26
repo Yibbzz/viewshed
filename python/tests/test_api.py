@@ -345,3 +345,52 @@ def test_horizon_map_geometry_edges_and_shadow_consistency():
         assert 0 < lit.sum() < lit.size
     with pytest.raises(ValueError):
         viewshed.horizon_map(z, GT, 0.0, target_height=-1.0)
+
+
+def test_horizon_map_max_distance():
+    z = wall()                                                  # 5 m wall along row 15
+    h = viewshed.horizon_map(z, GT, azimuth=0.0, curvature=False, max_distance=3.0)
+    assert h[20, 20] == 0.0                                     # the wall is 5 cells away
+    h = viewshed.horizon_map(z, GT, azimuth=0.0, curvature=False, max_distance=10.0)
+    assert abs(h[20, 20] - 45.0) < 1e-9
+
+
+def test_sky_view_factor_and_openness_flat_and_wall():
+    flat = np.zeros((21, 21))
+    for kind in ("visible_sky", "isotropic"):
+        svf = viewshed.sky_view_factor(flat, GT, kind=kind, azimuths=8, curvature=False)
+        assert svf.dtype == np.float64 and svf.shape == flat.shape
+        assert np.allclose(svf, 1.0)
+    op = viewshed.openness(flat, GT, azimuths=8)
+    assert op.dtype == np.float64 and op.shape == flat.shape
+    assert np.allclose(op, 90.0)
+
+    z = wall()
+    svf = viewshed.sky_view_factor(z, GT, kind="visible_sky", azimuths=8, curvature=False)
+    iso = viewshed.sky_view_factor(z, GT, kind="isotropic", azimuths=8, curvature=False)
+    op = viewshed.openness(z, GT, kind="positive", azimuths=8)
+    assert (svf < 1.0).any() and (iso < 1.0).any() and (op < 90.0).any()
+    assert np.all((svf >= 0.0) & (svf <= 1.0))
+    assert np.all((op >= -90.0) & (op <= 180.0))
+
+
+def test_sky_view_factor_and_openness_errors_and_no_data():
+    z = np.zeros((9, 9))
+    z[4, 4] = np.nan
+    for kind in ("visible_sky", "isotropic"):
+        svf = viewshed.sky_view_factor(z, GT, kind=kind, azimuths=4)
+        assert np.isnan(svf[4, 4]) and np.isfinite(svf[0, 0])
+    op = viewshed.openness(z, GT, azimuths=4)
+    assert np.isnan(op[4, 4]) and np.isfinite(op[0, 0])
+    with pytest.raises(ValueError, match="sky view factor"):
+        viewshed.sky_view_factor(z, GT, kind="nope")
+    with pytest.raises(ValueError, match="openness"):
+        viewshed.openness(z, GT, kind="nope")
+    with pytest.raises(ValueError, match="azimuths"):
+        viewshed.sky_view_factor(z, GT, azimuths=0)
+    with pytest.raises(ValueError, match="azimuths"):
+        viewshed.openness(z, GT, azimuths=2.5)
+    with pytest.raises(ValueError, match="max_distance"):
+        viewshed.sky_view_factor(z, GT, max_distance=0.0)
+    with pytest.raises(ValueError, match="target_height"):
+        viewshed.sky_view_factor(z, GT, target_height=-1.0)

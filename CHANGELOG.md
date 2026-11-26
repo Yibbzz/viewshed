@@ -2,6 +2,11 @@
 
 All notable changes to `viewshed` (the Rust crate and the Python package, which share a version).
 
+## Unreleased
+
+### Added
+- **Sky view factor and openness.** `viewshed.sky_view_factor(dem, transform, kind="visible_sky"|"isotropic", azimuths=32, ...)` and `viewshed.openness(dem, transform, kind="positive"|"negative", azimuths=32, ...)` in Python; `viewshed::sky_view_factor` and `viewshed::openness` in Rust. Exact per-direction horizons aggregated over K azimuths (default 32). `horizon_map` now accepts `max_distance` to limit the search radius.
+
 ## 0.4.0 (2026-11-24)
 
 ### Added

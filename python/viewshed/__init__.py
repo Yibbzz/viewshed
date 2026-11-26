@@ -29,7 +29,8 @@ pair can see each other (radio links).
 `shadow` gives exact cast shadows on the same bilinear surface for a sun at a
 given azimuth and elevation, and `sun_hours` adds them up over a time range: hours
 of direct sun per cell. `horizon_map` gives, for every cell, the exact elevation angle of
-the skyline in one direction.
+the skyline in one direction. `sky_view_factor` and `openness` aggregate exact horizons
+over several directions to measure sky exposure and terrain openness.
 
 Earth curvature and refraction are on by default: every point is lowered by
 d^2 / (2 R) * (1 - refraction) at horizontal distance d, as in GRASS
@@ -47,7 +48,7 @@ import numpy as np
 from . import _viewshed, reference
 
 __version__ = "0.4.0"
-__all__ = ["viewshed", "reverse_viewshed", "intervisible", "cumulative", "visibility_index", "ztv", "shadow", "horizon_map", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
+__all__ = ["viewshed", "reverse_viewshed", "intervisible", "cumulative", "visibility_index", "ztv", "shadow", "horizon_map", "sky_view_factor", "openness", "sun_hours", "sun_position", "MEAN_EARTH_RADIUS", "reference"]
 
 MEAN_EARTH_RADIUS = _viewshed.MEAN_EARTH_RADIUS
 """IUGG mean earth radius in metres, the default `earth_radius`. GRASS uses the
@@ -261,13 +262,14 @@ def shadow(dem, transform, azimuth, elevation, target_height=0.0, curvature=True
 
 
 def horizon_map(dem, transform, azimuth, target_height=0.0, curvature=True, refraction=0.13,
-                earth_radius=MEAN_EARTH_RADIUS):
+                earth_radius=MEAN_EARTH_RADIUS, max_distance=None):
     """Elevation angle of the horizon, in degrees, seen from every cell towards `azimuth`.
     A float64 array shaped like `dem`.
 
     azimuth: degrees clockwise from grid north (90 = east).
     target_height: height above each cell's surface that the horizon is seen from.
     curvature, refraction, earth_radius: as for `viewshed` (terrestrial refraction).
+    max_distance: only terrain within this horizontal distance counts (None = all of it).
 
     On the bilinear surface, the same model as `shadow`: the highest elevation angle of
     any point of the terrain ahead (on stretches of positive length; no-data never
@@ -283,7 +285,53 @@ def horizon_map(dem, transform, azimuth, target_height=0.0, curvature=True, refr
     _heights(("target_height", target_height))
     return _viewshed.horizon_map(_dem(dem), _transform(transform), float(azimuth),
                                  float(target_height), bool(curvature), float(refraction),
-                                 float(earth_radius))
+                                 float(earth_radius), _distance(max_distance))
+
+
+def sky_view_factor(dem, transform, kind="visible_sky", azimuths=32, max_distance=None,
+                    target_height=0.0, curvature=True, refraction=0.13,
+                    earth_radius=MEAN_EARTH_RADIUS):
+    """The fraction of the sky hemisphere visible from every cell. A float64 array shaped
+    like `dem` (NaN on no-data).
+
+    kind: "visible_sky" (the visible-sky fraction of Zaksek et al. 2011) or "isotropic"
+        (the isotropic diffuse sky view factor of Dozier & Frew 1990, for the local
+        sloped surface).
+    azimuths: number of evenly spaced directions from grid north, clockwise (32 by default).
+        Each direction's horizon is exact; only the azimuth sampling is approximate.
+    max_distance: only terrain within this horizontal distance counts (None = all of it).
+    target_height: height above the surface from which the sky is seen.
+    curvature, refraction, earth_radius: as for `viewshed`.
+
+    The visible-sky value is 1 - mean(sin(max(horizon, 0))). The isotropic value uses
+    the directional terrain slope and the horizon raised to the local tangent plane. The
+    isotropic estimate can slightly exceed 1 with few directions; it is not clamped.
+    """
+    _heights(("target_height", target_height))
+    if int(azimuths) != azimuths or azimuths < 1:
+        raise ValueError("azimuths must be an integer of at least 1")
+    return _viewshed.sky_view_factor(_dem(dem), _transform(transform), str(kind), int(azimuths),
+                                     _distance(max_distance), float(target_height),
+                                     bool(curvature), float(refraction), float(earth_radius))
+
+
+def openness(dem, transform, kind="positive", azimuths=32, max_distance=None):
+    """Terrain openness in degrees for every cell: a float64 array shaped like `dem`
+    (NaN on no-data).
+
+    kind: "positive" (openness above the surface) or "negative" (the same on the
+        surface turned upside down).
+    azimuths: number of evenly spaced directions from grid north, clockwise (32 by default).
+    max_distance: the search radius in horizontal distance (None = unlimited).
+
+    Positive openness is the mean of 90 degrees minus the horizon elevation angle.
+    Negative openness measures the largest depression angles below the surface. Openness
+    is measured at the surface, without earth curvature.
+    """
+    if int(azimuths) != azimuths or azimuths < 1:
+        raise ValueError("azimuths must be an integer of at least 1")
+    return _viewshed.openness(_dem(dem), _transform(transform), str(kind), int(azimuths),
+                              _distance(max_distance))
 
 
 SunPosition = namedtuple("SunPosition", "azimuth elevation elevation_true")

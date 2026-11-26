@@ -9,7 +9,7 @@ use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use ::viewshed as vs;
-use vs::{Grid, HorizonOptions, LosOptions, Options, Point, ShadowOptions, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
+use vs::{Grid, HorizonOptions, LosOptions, Openness, OpennessOptions, Options, Point, ShadowOptions, SkyOptions, SkyViewFactor, Sun, Surface, ZtvMethod, ZtvOptions, ZtvTarget};
 
 fn value_error(e: vs::Error) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -305,10 +305,11 @@ fn horizon_map_py<'py>(
     curvature: bool,
     refraction: f64,
     earth_radius: f64,
+    max_distance: Option<f64>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
     let z = dem.as_slice()?;
-    let opts = HorizonOptions { target_height, curvature, refraction, earth_radius, max_distance: None };
+    let opts = HorizonOptions { target_height, max_distance, curvature, refraction, earth_radius };
     let h = py
         .detach(|| {
             let grid = Grid::new(z, rows, cols, transform)?;
@@ -316,6 +317,65 @@ fn horizon_map_py<'py>(
         })
         .map_err(value_error)?;
     Ok(PyArray1::from_vec(py, h).reshape([rows, cols])?.into_any())
+}
+
+/// Sky view factor from exact horizons (0..1; NaN on no-data).
+#[pyfunction(name = "sky_view_factor")]
+#[allow(clippy::too_many_arguments)]
+fn sky_view_factor_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    kind: &str,
+    azimuths: usize,
+    max_distance: Option<f64>,
+    target_height: f64,
+    curvature: bool,
+    refraction: f64,
+    earth_radius: f64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kind = match kind {
+        "visible_sky" => SkyViewFactor::VisibleSky,
+        "isotropic" => SkyViewFactor::Isotropic,
+        _ => return Err(PyValueError::new_err(format!("unknown sky view factor {kind:?}: use 'visible_sky' or 'isotropic'"))),
+    };
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let opts = SkyOptions { azimuths, max_distance, target_height, curvature, refraction, earth_radius };
+    let out = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::sky_view_factor(&grid, kind, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, out).reshape([rows, cols])?.into_any())
+}
+
+/// Positive or negative terrain openness in degrees (NaN on no-data).
+#[pyfunction(name = "openness")]
+fn openness_py<'py>(
+    py: Python<'py>,
+    dem: PyReadonlyArray2<'py, f64>,
+    transform: [f64; 6],
+    kind: &str,
+    azimuths: usize,
+    max_distance: Option<f64>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let kind = match kind {
+        "positive" => Openness::Positive,
+        "negative" => Openness::Negative,
+        _ => return Err(PyValueError::new_err(format!("unknown openness {kind:?}: use 'positive' or 'negative'"))),
+    };
+    let (rows, cols) = (dem.shape()[0], dem.shape()[1]);
+    let z = dem.as_slice()?;
+    let opts = OpennessOptions { azimuths, max_distance };
+    let out = py
+        .detach(|| {
+            let grid = Grid::new(z, rows, cols, transform)?;
+            vs::openness(&grid, kind, &opts)
+        })
+        .map_err(value_error)?;
+    Ok(PyArray1::from_vec(py, out).reshape([rows, cols])?.into_any())
 }
 
 #[pymodule]
@@ -327,6 +387,8 @@ fn _viewshed(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(visibility_index_py, m)?)?;
     m.add_function(wrap_pyfunction!(shadow_py, m)?)?;
     m.add_function(wrap_pyfunction!(horizon_map_py, m)?)?;
+    m.add_function(wrap_pyfunction!(sky_view_factor_py, m)?)?;
+    m.add_function(wrap_pyfunction!(openness_py, m)?)?;
     m.add_function(wrap_pyfunction!(intervisible_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_hours_py, m)?)?;
     m.add_function(wrap_pyfunction!(sun_position_py, m)?)?;
