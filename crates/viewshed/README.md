@@ -92,6 +92,22 @@ let ok = intervisible(&grid, &[(mast, site)], &LosOptions::default()).unwrap(); 
 
 The model is the bilinear surface (as `surface="bilinear"`): two points see each other when the segment between them is nowhere strictly below the surface along a stretch of positive length, with earth curvature and refraction as for viewsheds. The answer doesn't depend on which point is first, and for targets on cell centres it equals the bilinear viewshed. Most of each sightline is cleared by a bound (a bilinear patch never rises above its highest corner); stretches close to the ground are decided per patch in floating point with rigorous error margins, and the rare ones within the margin in exact rational arithmetic. On a 2,001 × 2,001 raster at 10 m, 20,000 links of up to 6 km take about 1 s on a 4-core laptop (about 50 µs per link).
 
+## Fresnel clearance
+
+`fresnel_clearance` gives the worst clearance of a radio link through the first Fresnel zone.
+
+```rust
+use viewshed::{fresnel_clearance, LosOptions, Point};
+let a = Point { x: 100.0, y: 200.0, height: 10.0 };
+let b = Point { x: 300.0, y: 200.0, height: 10.0 };
+let c = fresnel_clearance(&grid, &[(a, b)], 2.4e9, &LosOptions::default()).unwrap()[0];
+println!("ratio={} t={}", c.ratio, c.t);
+```
+
+The link ends are `(x, y, height above the surface)` in metres. The result is the minimum, along the link, of the vertical clearance between the sightline and the terrain divided by the first-zone radius `sqrt(lambda d1 d2 / D)`. A ratio of 1 means the whole first zone is clear, 0.6 is the usual planning target, 0 is grazing, and a negative ratio means the terrain blocks the line itself. `t` is the position of the worst point from `a` to `b`.
+
+The calculation is exact on the bilinear surface, including curvature and refraction, and is certified to within `1e-9 + 1e-12 |ratio|` of the exact rational-arithmetic value. Links run in parallel; on the mixed 2,001 × 2,001 benchmark terrain they take about 16–19 microseconds per pair on 4 cores.
+
 ## Reverse viewshed
 
 `reverse_viewshed` turns the question round: from which cells can a target at (x, y), `opts.target_height` above the ground, be seen by an observer `opts.observer_height` above each cell?

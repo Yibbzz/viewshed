@@ -207,7 +207,11 @@ impl<'a> Link<'a> {
     }
 
     fn solve(&self) -> Clearance {
-        if !(self.scale.is_finite() && self.scale > 0.0) || self.cells == 0.0 {
+        // test hook VIEWSHED_FRESNEL_EXACT_ALL: every link through the exact fallback
+        if !(self.scale.is_finite() && self.scale > 0.0)
+            || self.cells == 0.0
+            || std::env::var_os("VIEWSHED_FRESNEL_EXACT_ALL").is_some()
+        {
             // the floats can't resolve the link's length: all in exact arithmetic
             let (_, hi, t) = self.exact_min(&[(0.0, 1.0)]);
             return Clearance { ratio: hi * self.exact_scale(), t };
@@ -318,10 +322,8 @@ impl<'a> Link<'a> {
         let grid = self.grid;
         let (rows, cols) = (grid.rows as i64, grid.cols as i64);
         // the crossings' parameters are within ~4U coord cells of the exact ones (the float
-        // ends and the division): widen by twice that; points for upper bounds stay 64U coord
-        // cells inside
+        // ends and the division): widen by twice that
         let eps = 8.0 * U * self.coord;
-        let inner = 64.0 * U * self.coord;
         let (ua, ub) = (self.fu + t0 * self.fdu, self.fu + t1 * self.fdu);
         let (va, vb) = (self.fv + t0 * self.fdv, self.fv + t1 * self.fdv);
         let fdz = self.fzb - self.fbend - self.fza;
@@ -355,9 +357,18 @@ impl<'a> Link<'a> {
                 if !(ta < tb) {
                     continue;
                 }
-                let (oa1, ob1) = span(self.fu, self.fdu, c0 as f64, -inner);
-                let (oa2, ob2) = span(self.fv, self.fdv, r0 as f64, -inner);
-                let (oa, ob) = (oa1.max(oa2).max(ta).max(0.0), ob1.min(ob2).min(tb).min(1.0));
+                // The patch includes its boundary, so a link lying exactly on a grid line
+                // can still use the owned valid patch for upper bounds.  The crossing
+                // interval above is widened for roundoff; these intervals are not, and
+                // are not clipped to that widened interval.
+                let (oa1, ob1) = span(self.fu, self.fdu, c0 as f64, 0.0);
+                let (oa2, ob2) = span(self.fv, self.fdv, r0 as f64, 0.0);
+                // With a constant coordinate exactly on a cell-centre line, use the
+                // patch on the floor side, matching the surface's ownership of a
+                // boundary point (the other side may even be no-data).
+                let owns_c = self.fdu != 0.0 || c0 == self.fu.floor() as i64;
+                let owns_r = self.fdv != 0.0 || r0 == self.fv.floor() as i64;
+                let (oa, ob) = (oa1.max(oa2).max(0.0), ob1.min(ob2).min(1.0));
                 let tp = ta;
                 let (d01, d10, e3) = (z01 - z00, z10 - z00, z00 - z01 - z10 + z11);
                 let tc = self.fu + tp * self.fdu - c0 as f64;
@@ -378,7 +389,7 @@ impl<'a> Link<'a> {
                     eg,
                     s_lo: 0.0,
                     s_hi: tb - tp,
-                    own: if oa < ob && ob > 0.0 && oa < 1.0 { Some((oa - tp, ob - tp)) } else { None },
+                    own: if owns_c && owns_r && oa < ob && ob > 0.0 && oa < 1.0 { Some((oa - tp, ob - tp)) } else { None },
                 });
             }
         }

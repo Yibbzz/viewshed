@@ -53,8 +53,17 @@ def _scenes(n_scenes=60, seed=43):
         yield k, z, gt, pairs, bool(k % 2), 30.0 * res, freq
 
 
+@pytest.fixture(params=["float", "exact"])
+def path(request, monkeypatch):
+    """Both paths: the float search, and every link through the exact fallback
+    (VIEWSHED_FRESNEL_EXACT_ALL; read per call, so it applies to the next call)."""
+    if request.param == "exact":
+        monkeypatch.setenv("VIEWSHED_FRESNEL_EXACT_ALL", "1")
+    return request.param
+
+
 @pytest.mark.parametrize("scene", list(_scenes()), ids=lambda s: f"scene{s[0]}")
-def test_fresnel_equals_exact_oracle(scene):
+def test_fresnel_equals_exact_oracle(scene, path):
     _, z, gt, pairs, curved, radius, freq = scene
     kw = dict(curvature=curved, refraction=0.13, earth_radius=radius)
     checked = 0
@@ -107,7 +116,7 @@ def test_fresnel_flat_closed_form_and_batch():
     want = 2 * 10 / math.sqrt(299792458.0 / 1e9 * 1000)
     assert abs(got - want) <= tol(want) and abs(t - 0.5) < 1e-6
     a = np.array([[15.0, 105.0, 10.0], [15.0, 55.0, 5.0]])
-    batch = viewshed.fresnel_clearance(z, gt, a, (1015.0, 105.0, 10.0), 1e9)
+    batch = viewshed.fresnel_clearance(z, gt, a, (1015.0, 105.0, 10.0), 1e9, curvature=False)
     assert batch.shape == (2,) and abs(batch[0] - want) <= tol(want)
 
 

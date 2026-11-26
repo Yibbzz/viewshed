@@ -182,8 +182,9 @@ def fresnel_clearance(dem, transform, a, b, frequency, curvature=True, refractio
     return_position: also return t, where along the link (0 at a, 1 at b) the worst point is.
 
     Returns the ratio (a float, or an array of length n): the smallest value along the
-    link of (gap below the sightline) / (first Fresnel zone radius), with the zone radius
-    sqrt(lambda d1 d2 / D). 1 = the first zone is clear, 0.6 the usual planning target,
+    link of (vertical clearance between sightline and terrain) / (first Fresnel zone
+    radius), with the zone radius sqrt(lambda d1 d2 / D). 1 = the first zone is clear,
+    0.6 the usual planning target,
     0 grazing, below 0 the line itself is blocked; inf if there is no data under the link.
     The ITU-R P.526 diffraction parameter of the worst point is nu = -sqrt(2) * ratio.
 

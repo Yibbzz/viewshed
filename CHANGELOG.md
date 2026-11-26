@@ -2,6 +2,11 @@
 
 All notable changes to `viewshed` (the Rust crate and the Python package, which share a version).
 
+## Unreleased
+
+### Added
+- **Fresnel clearance.** `viewshed.fresnel_clearance(dem, transform, a, b, frequency, ...)` in Python and `viewshed::fresnel_clearance` in Rust compute the worst clearance of a radio link through the first Fresnel zone. Exact on the bilinear surface, certified to within `1e-9 + 1e-12 |ratio|` of the exact rational-arithmetic value.
+
 ## 0.4.0 (2026-11-24)
 
 ### Added
